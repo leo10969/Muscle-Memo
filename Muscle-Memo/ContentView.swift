@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     var body: some View {
@@ -226,6 +227,9 @@ struct CalendarView: View {
 struct StatsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var workoutSessions: [WorkoutSession]
+    @State private var showingExportMenu = false
+    @State private var exportDocument: CSVDocument?
+    @State private var showingDocumentPicker = false
     
     var body: some View {
         NavigationView {
@@ -254,7 +258,69 @@ struct StatsView: View {
                 .padding()
             }
             .navigationTitle("統計")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showingExportMenu = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .disabled(workoutSessions.isEmpty)
+                }
+            }
+            .actionSheet(isPresented: $showingExportMenu) {
+                ActionSheet(
+                    title: Text("データをエクスポート"),
+                    message: Text("エクスポートする形式を選択してください"),
+                    buttons: [
+                        .default(Text("📊 全ワークアウトデータ")) {
+                            exportWorkouts()
+                        },
+                        .default(Text("📈 日別統計データ")) {
+                            exportStats()
+                        },
+                        .default(Text("💪 部位別統計データ")) {
+                            exportBodyPartStats()
+                        },
+                        .cancel(Text("キャンセル"))
+                    ]
+                )
+            }
+            .fileExporter(
+                isPresented: $showingDocumentPicker,
+                document: exportDocument,
+                contentType: .commaSeparatedText,
+                defaultFilename: exportDocument?.filename ?? "export"
+            ) { result in
+                switch result {
+                case .success(let url):
+                    print("ファイルが保存されました: \(url)")
+                case .failure(let error):
+                    print("エクスポートエラー: \(error.localizedDescription)")
+                }
+            }
         }
+    }
+    
+    private func exportWorkouts() {
+        let csvContent = DataExporter.exportWorkoutsToCSV(sessions: workoutSessions)
+        let filename = DataExporter.generateFileName(prefix: "muscle_memo_workouts")
+        exportDocument = CSVDocument(content: csvContent, filename: filename)
+        showingDocumentPicker = true
+    }
+    
+    private func exportStats() {
+        let csvContent = DataExporter.exportStatsToCSV(sessions: workoutSessions)
+        let filename = DataExporter.generateFileName(prefix: "muscle_memo_stats")
+        exportDocument = CSVDocument(content: csvContent, filename: filename)
+        showingDocumentPicker = true
+    }
+    
+    private func exportBodyPartStats() {
+        let csvContent = DataExporter.exportBodyPartStatsToCSV(sessions: workoutSessions)
+        let filename = DataExporter.generateFileName(prefix: "muscle_memo_bodypart_stats")
+        exportDocument = CSVDocument(content: csvContent, filename: filename)
+        showingDocumentPicker = true
     }
 }
 
