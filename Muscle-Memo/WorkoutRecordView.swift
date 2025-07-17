@@ -29,27 +29,33 @@ struct NewWorkoutSheet: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                // 部位選択
+                // 部位選択（固定）
                 BodyPartPicker(selectedBodyPart: $selectedBodyPart)
                 
-                // 前回の記録表示
-                PreviousWorkoutDisplay(bodyPart: selectedBodyPart, sessions: allWorkoutSessions)
-                
-                // 現在のワークアウト
-                CurrentWorkoutView(
-                    workout: currentWorkout,
-                    selectedBodyPart: selectedBodyPart,
-                    onAddExercise: {
-                        showingExerciseSheet = true
-                    },
-                    onAddSet: { exercise in
-                        exerciseForSetInput = exercise
+                // スクロール可能なコンテンツ
+                ScrollView {
+                    VStack(spacing: 0) {
+                        // 前回の記録表示
+                        PreviousWorkoutDisplay(bodyPart: selectedBodyPart, sessions: allWorkoutSessions)
+                        
+                        // 現在のワークアウト
+                        CurrentWorkoutView(
+                            workout: currentWorkout,
+                            selectedBodyPart: selectedBodyPart,
+                            onAddExercise: {
+                                showingExerciseSheet = true
+                            },
+                            onAddSet: { exercise in
+                                exerciseForSetInput = exercise
+                            }
+                        )
+                        
+                        // 保存ボタンの余白確保
+                        Spacer(minLength: 100)
                     }
-                )
+                }
                 
-                Spacer()
-                
-                // 保存ボタン
+                // 保存ボタン（固定）
                 SaveWorkoutButton(workout: currentWorkout) {
                     saveWorkout()
                 }
