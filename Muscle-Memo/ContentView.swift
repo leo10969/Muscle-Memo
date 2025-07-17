@@ -230,6 +230,10 @@ struct StatsView: View {
     @State private var showingExportMenu = false
     @State private var exportDocument: CSVDocument?
     @State private var showingDocumentPicker = false
+    @State private var showingImportPicker = false
+    @State private var showingImportResult = false
+    @State private var importResult: ImportResult?
+    @State private var importError: ImportError?
     
     var body: some View {
         NavigationView {
@@ -259,6 +263,14 @@ struct StatsView: View {
             }
             .navigationTitle("統計")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        showingImportPicker = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                }
+                
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showingExportMenu = true
@@ -299,6 +311,22 @@ struct StatsView: View {
                     print("エクスポートエラー: \(error.localizedDescription)")
                 }
             }
+            .fileImporter(
+                isPresented: $showingImportPicker,
+                allowedContentTypes: [.commaSeparatedText, .plainText],
+                allowsMultipleSelection: false
+            ) { result in
+                handleImportResult(result)
+            }
+            .alert("インポート結果", isPresented: $showingImportResult) {
+                Button("OK") { }
+            } message: {
+                if let result = importResult {
+                    Text(generateImportResultMessage(result))
+                } else if let error = importError {
+                    Text("エラー: \(error.localizedDescription)")
+                }
+            }
         }
     }
     
@@ -321,6 +349,77 @@ struct StatsView: View {
         let filename = DataExporter.generateFileName(prefix: "muscle_memo_bodypart_stats")
         exportDocument = CSVDocument(content: csvContent, filename: filename)
         showingDocumentPicker = true
+    }
+    
+    private func handleImportResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let fileURL = urls.first else { return }
+            
+            do {
+                let csvContent = try String(contentsOf: fileURL, encoding: .utf8)
+                let importResult = DataExporter.importWorkoutsFromCSV(csvContent: csvContent)
+                
+                switch importResult {
+                case .success(let result):
+                    // データベースに保存
+                    saveImportedSessions(result.importedSessions)
+                    self.importResult = result
+                    self.importError = nil
+                    showingImportResult = true
+                    
+                case .failure(let error):
+                    self.importError = error
+                    self.importResult = nil
+                    showingImportResult = true
+                }
+                
+            } catch {
+                self.importError = ImportError.parseError("ファイルの読み込みに失敗しました: \(error.localizedDescription)")
+                self.importResult = nil
+                showingImportResult = true
+            }
+            
+        case .failure(let error):
+            self.importError = ImportError.parseError("ファイル選択エラー: \(error.localizedDescription)")
+            self.importResult = nil
+            showingImportResult = true
+        }
+    }
+    
+    private func saveImportedSessions(_ sessions: [WorkoutSession]) {
+        for session in sessions {
+            modelContext.insert(session)
+        }
+        
+        do {
+            try modelContext.save()
+        } catch {
+            print("データ保存エラー: \(error.localizedDescription)")
+        }
+    }
+    
+    private func generateImportResultMessage(_ result: ImportResult) -> String {
+        var message = "インポートが完了しました。\n\n"
+        message += "✅ 成功: \(result.successCount)セッション\n"
+        message += "📊 処理行数: \(result.processedCount)行\n"
+        
+        if result.skippedCount > 0 {
+            message += "⚠️ スキップ: \(result.skippedCount)行\n"
+        }
+        
+        if result.hasErrors {
+            message += "\n⚠️ エラー詳細:\n"
+            let errorCount = min(result.errors.count, 5) // 最大5個まで表示
+            for i in 0..<errorCount {
+                message += "• \(result.errors[i])\n"
+            }
+            if result.errors.count > 5 {
+                message += "...他\(result.errors.count - 5)件\n"
+            }
+        }
+        
+        return message
     }
 }
 
