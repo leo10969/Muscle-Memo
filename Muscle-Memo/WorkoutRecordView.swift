@@ -108,6 +108,7 @@ struct NewWorkoutSheet: View {
 
 struct BodyPartPicker: View {
     @Binding var selectedBodyPart: BodyPart
+    @State private var showOptionalParts = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -127,12 +128,29 @@ struct BodyPartPicker: View {
                 }
             }
             
-            // オプション部位
-            VStack(alignment: .leading, spacing: 8) {
-                Text("オプション部位")
-                    .font(.headline)
-                    .padding(.horizontal)
+            // オプション部位の展開ボタン
+            HStack {
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        showOptionalParts.toggle()
+                    }
+                }) {
+                    HStack(spacing: 8) {
+                        Text("オプション部位")
+                            .font(.headline)
+                        Image(systemName: showOptionalParts ? "chevron.up" : "chevron.down")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .foregroundColor(.primary)
+                .padding(.horizontal)
                 
+                Spacer()
+            }
+            
+            // オプション部位（条件付き表示）
+            if showOptionalParts {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
                         ForEach(BodyPart.optionalParts, id: \.self) { bodyPart in
@@ -141,6 +159,7 @@ struct BodyPartPicker: View {
                     }
                     .padding(.horizontal)
                 }
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(.vertical)
