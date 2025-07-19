@@ -17,18 +17,22 @@ struct ContentView: View {
                     Image(systemName: "house.fill")
                     Text("ホーム")
                 }
+                .tag(0)
             
             CalendarView()
                 .tabItem {
                     Image(systemName: "calendar")
                     Text("カレンダー")
                 }
+                .tag(1)
+                .id("CalendarView") // 固有のIDを設定
             
             StatsView()
                 .tabItem {
                     Image(systemName: "chart.bar.fill")
                     Text("統計")
                 }
+                .tag(2)
         }
         .accentColor(.blue)
     }
@@ -41,6 +45,12 @@ struct HomeView: View {
     @State private var showingNewWorkoutSheet = false
     @State private var showingWorkoutDetail = false
     @State private var selectedWorkoutSession: WorkoutSession?
+    @State private var selectedDateForNewWorkout: Date?
+    @State private var showingSuggestionSheet = false
+    @State private var selectedSuggestionBodyPart: BodyPart?
+    @State private var showingQuickWorkoutSheet = false
+    @State private var selectedQuickAccessBodyPart: BodyPart?
+    @State private var showingWorkoutOptions = false
 
     var body: some View {
         NavigationView {
@@ -58,10 +68,14 @@ struct HomeView: View {
                         StreakCard(workoutSessions: workoutSessions)
                         
                         // 次のトレーニング提案
-                        NextWorkoutSuggestionCard()
+                        NextWorkoutSuggestionCard(onSuggestionTap: { suggestedBodyPart in
+                            selectedSuggestionBodyPart = suggestedBodyPart
+                            showingQuickWorkoutSheet = true
+                        })
                         
                         // クイックアクセス（よく使う部位）
                         QuickAccessCard(workoutSessions: workoutSessions, onBodyPartSelected: { bodyPart in
+                            selectedQuickAccessBodyPart = bodyPart
                             showingNewWorkoutSheet = true
                         })
                         
@@ -88,7 +102,7 @@ struct HomeView: View {
                         Spacer()
                         
                         Button(action: {
-                            showingNewWorkoutSheet = true
+                            showingWorkoutOptions = true
                         }) {
                             Image(systemName: "plus")
                                 .font(.title2)
@@ -105,20 +119,80 @@ struct HomeView: View {
                 }
             }
             .navigationTitle("ホーム")
-            .sheet(isPresented: $showingNewWorkoutSheet) {
-                NewWorkoutSheet()
+            .sheet(isPresented: $showingNewWorkoutSheet, onDismiss: {
+                selectedDateForNewWorkout = nil
+                selectedSuggestionBodyPart = nil
+                selectedQuickAccessBodyPart = nil
+            }) {
+                if let selectedDate = selectedDateForNewWorkout {
+                    NewWorkoutSheet(initialDate: selectedDate)
+                } else if let suggestedBodyPart = selectedSuggestionBodyPart {
+                    NewWorkoutSheetWithSuggestion(suggestedBodyPart: suggestedBodyPart)
+                } else if let quickAccessBodyPart = selectedQuickAccessBodyPart {
+                    NewWorkoutSheetWithBodyPart(initialBodyPart: quickAccessBodyPart)
+                } else {
+                    NewWorkoutSheet()
+                }
             }
             .sheet(isPresented: $showingWorkoutDetail) {
                 if let selectedSession = selectedWorkoutSession {
                     WorkoutDetailSheet(
                         date: selectedSession.date,
                         sessions: workoutSessions,
-                        onAddWorkout: {
+                        onAddWorkout: { date in
+                            selectedDateForNewWorkout = date
                             showingNewWorkoutSheet = true
                         }
                     )
                 }
             }
+            .sheet(isPresented: $showingSuggestionSheet) {
+                WorkoutSuggestionSheet(
+                    onSuggestionSelected: { bodyPart in
+                        selectedSuggestionBodyPart = bodyPart
+                        showingSuggestionSheet = false
+                        showingNewWorkoutSheet = true
+                    }
+                )
+            }
+            .sheet(isPresented: $showingQuickWorkoutSheet, onDismiss: {
+                selectedSuggestionBodyPart = nil
+            }) {
+                let bodyPart = selectedSuggestionBodyPart ?? .chest
+                QuickWorkoutSheet(
+                    suggestedBodyPart: bodyPart,
+                    allSessions: Array(workoutSessions)
+                )
+            }
+            .confirmationDialog("ワークアウトを開始", isPresented: $showingWorkoutOptions, titleVisibility: .visible) {
+                Button("新しいワークアウト") {
+                    showingNewWorkoutSheet = true
+                }
+                
+                Button("提案されたワークアウト") {
+                    let suggestion = getNextWorkoutSuggestion()
+                    selectedSuggestionBodyPart = suggestion
+                    showingQuickWorkoutSheet = true
+                }
+                
+                Button("キャンセル", role: .cancel) { }
+            } message: {
+                Text("どのようにワークアウトを開始しますか？")
+            }
+        }
+    }
+    
+    private func getNextWorkoutSuggestion() -> BodyPart? {
+        guard !workoutSessions.isEmpty else { return .chest }
+        
+        let recentSessions = workoutSessions.prefix(10)
+        let recentBodyParts = recentSessions.flatMap { $0.trainedBodyParts }
+        let bodyPartCounts = Dictionary(grouping: recentBodyParts, by: { $0 })
+            .mapValues { $0.count }
+        
+        // メイン部位（必須部位）のみを対象にした提案
+        return BodyPart.requiredParts.min { bodyPart1, bodyPart2 in
+            bodyPartCounts[bodyPart1, default: 0] < bodyPartCounts[bodyPart2, default: 0]
         }
     }
 }
@@ -126,13 +200,23 @@ struct HomeView: View {
 // カレンダー画面
 struct CalendarView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var workoutSessions: [WorkoutSession]
-    @State private var selectedDate = Date()
-    @State private var currentMonth = Date()
+    @Query(sort: \WorkoutSession.date, order: .reverse) private var workoutSessions: [WorkoutSession]
+    @State private var selectedDate: Date = Calendar.current.startOfDay(for: Date())
+    @State private var currentMonth: Date = Calendar.current.startOfDay(for: Date())
     @State private var selectedFilterBodyPart: BodyPart? = nil
     @State private var showingWorkoutDetail = false
     @State private var showingNewWorkoutSheet = false
     @State private var selectedDateForNewWorkout: Date?
+    @State private var detailDate: Date? // WorkoutDetailSheetに渡す専用の日付
+    @State private var isViewAppeared = false // ビューの表示状態を管理
+    @State private var refreshID = UUID() // ビューの強制再描画用
+    
+    // カレンダー用の統一された設定
+    private let calendar: Calendar = {
+        var cal = Calendar.current
+        cal.timeZone = TimeZone.current
+        return cal
+    }()
     
     // フィルタリング後のワークアウトセッション
     private var filteredWorkoutSessions: [WorkoutSession] {
@@ -150,10 +234,6 @@ struct CalendarView: View {
                 // スクロール可能なメインコンテンツ
                 ScrollView {
                     VStack(spacing: 16) {
-                        // 次のトレーニング提案
-                        NextWorkoutSuggestionCard()
-                            .padding(.horizontal)
-                        
                         // 部位フィルター（カラー統合版）
                         BodyPartFilterWithColorView(selectedBodyPart: $selectedFilterBodyPart)
                         
@@ -163,10 +243,32 @@ struct CalendarView: View {
                             selectedDate: $selectedDate,
                             workoutSessions: filteredWorkoutSessions,
                             onDateTap: { date in
-                                selectedDate = date
+                                // タイムゾーンを明示的に設定したカレンダーで正規化
+                                var calendarForNormalization = Calendar.current
+                                calendarForNormalization.timeZone = TimeZone.current
+                                
+                                // 日付をJSTの00:00に正規化
+                                let normalizedDate = calendarForNormalization.startOfDay(for: date)
+                                
+                                print("=== Calendar Date Tap Debug ===")
+                                print("Original tapped date: \(date)")
+                                print("Normalized tapped date: \(normalizedDate)")
+                                print("Current selectedDate: \(selectedDate)")
+                                print("Current detailDate: \(detailDate?.description ?? "nil")")
+                                print("isViewAppeared: \(isViewAppeared)")
+                                print("TimeZone: \(calendarForNormalization.timeZone.identifier)")
+                                
+                                // 確実に状態を更新（正規化された日付を使用）
+                                selectedDate = normalizedDate
+                                detailDate = normalizedDate
+                                
+                                print("Updated detailDate: \(detailDate?.description ?? "nil")")
+                                print("Updated selectedDate: \(selectedDate)")
+                                print("Showing workout detail immediately")
                                 showingWorkoutDetail = true
                             }
                         )
+                        .id(refreshID) // 強制再描画のためのID
                     }
                     .padding(.bottom, 100) // ボタンとのスペースを確保
                 }
@@ -198,12 +300,44 @@ struct CalendarView: View {
                 .background(Color(.systemBackground))
             }
             .navigationTitle("カレンダー")
-            .sheet(isPresented: $showingWorkoutDetail) {
+            .onAppear {
+                print("CalendarView appeared") // デバッグ用
+                // ビュー表示時の初期化処理
+                if !isViewAppeared {
+                    isViewAppeared = true
+                    // 状態を明示的にリセット
+                    detailDate = nil
+                    showingWorkoutDetail = false
+                    // 現在の日付で月を初期化（startOfDayで正規化）
+                    var initCalendar = Calendar.current
+                    initCalendar.timeZone = TimeZone.current
+                    let today = initCalendar.startOfDay(for: Date())
+                    currentMonth = today
+                    selectedDate = today
+                    // ビューの強制再描画
+                    refreshID = UUID()
+                    print("CalendarView initialized with date: \(today)")
+                    print("Init TimeZone: \(initCalendar.timeZone.identifier)")
+                }
+            }
+            .onDisappear {
+                print("CalendarView disappeared") // デバッグ用
+                // ビュー非表示時のクリーンアップ
+                detailDate = nil
+                showingWorkoutDetail = false
+            }
+            .sheet(isPresented: $showingWorkoutDetail, onDismiss: {
+                print("WorkoutDetailSheet dismissed")
+                detailDate = nil // シートが閉じられた時にリセット
+            }) {
+                // 強制的にdetailDateを使用（nilの場合はselectedDate）
+                let dateToUse = detailDate ?? selectedDate
+                let _ = print("=== WorkoutDetailSheet created with date: \(dateToUse) ===")
                 WorkoutDetailSheet(
-                    date: selectedDate, 
-                    sessions: filteredWorkoutSessions,
-                    onAddWorkout: {
-                        selectedDateForNewWorkout = selectedDate
+                    date: dateToUse,
+                    sessions: Array(workoutSessions),
+                    onAddWorkout: { date in
+                        selectedDateForNewWorkout = date
                         showingNewWorkoutSheet = true
                     }
                 )
@@ -243,6 +377,12 @@ struct StatsView: View {
                     // 称号・ランク表示
                     TitleCard(sessions: workoutSessions)
                     
+                    // 週間統計（修正版）
+                    WeeklyStatsCard(workoutSessions: workoutSessions)
+                    
+                    // 週ごとのワークアウト推移グラフ
+                    WeeklyTrendCard(sessions: workoutSessions)
+                    
                     // 面白い統計
                     FunFactsCard(sessions: workoutSessions)
                     
@@ -252,7 +392,7 @@ struct StatsView: View {
                     // 月別統計
                     MonthlyStatsCard(sessions: workoutSessions)
                     
-                    // 部位別詳細統計
+                    // 部位別詳細統計（グラフ付き）
                     DetailedBodyPartStatsCard(sessions: workoutSessions)
                     
                     // 継続ランキング
@@ -428,40 +568,57 @@ struct StatsView: View {
 struct NextWorkoutSuggestionCard: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \WorkoutSession.date, order: .reverse) private var workoutSessions: [WorkoutSession]
+    let onSuggestionTap: (BodyPart?) -> Void
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "lightbulb.fill")
-                    .foregroundColor(.yellow)
-                Text("次のトレーニング提案")
-                    .font(.headline)
-            }
-            
-            if let suggestion = getNextWorkoutSuggestion() {
-                Text("\(suggestion.displayName)のトレーニングがおすすめです")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                
+        Button(action: {
+            onSuggestionTap(getNextWorkoutSuggestion())
+        }) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    ForEach(suggestion.defaultExercises.prefix(3), id: \.self) { exercise in
-                        Text(exercise)
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.blue.opacity(0.1))
-                            .cornerRadius(8)
-                    }
+                    Image(systemName: "lightbulb.fill")
+                        .foregroundColor(.yellow)
+                    Text("次のトレーニング提案")
+                        .font(.headline)
+                    
+                    Spacer()
+                    
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-            } else {
-                Text("今日から筋トレを始めましょう！")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+                
+                if let suggestion = getNextWorkoutSuggestion() {
+                    Text("\(suggestion.displayName)のトレーニングがおすすめです")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    
+                    HStack {
+                        ForEach(suggestion.defaultExercises.prefix(3), id: \.self) { exercise in
+                            Text(exercise)
+                                .font(.caption)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.blue.opacity(0.1))
+                                .cornerRadius(8)
+                        }
+                    }
+                } else {
+                    Text("今日から筋トレを始めましょう！")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                
+                Text("タップして前回の種目でクイックスタート")
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                    .fontWeight(.medium)
             }
+            .padding()
+            .background(Color(.systemGray6))
+            .cornerRadius(12)
         }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
+        .buttonStyle(PlainButtonStyle())
     }
     
     private func getNextWorkoutSuggestion() -> BodyPart? {
@@ -476,6 +633,136 @@ struct NextWorkoutSuggestionCard: View {
         return BodyPart.requiredParts.min { bodyPart1, bodyPart2 in
             bodyPartCounts[bodyPart1, default: 0] < bodyPartCounts[bodyPart2, default: 0]
         }
+    }
+}
+
+struct WorkoutSuggestionSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \WorkoutSession.date, order: .reverse) private var workoutSessions: [WorkoutSession]
+    let onSuggestionSelected: (BodyPart) -> Void
+    
+    private var suggestions: [BodyPart] {
+        guard !workoutSessions.isEmpty else { return [.chest, .legs, .back] }
+        
+        let recentSessions = workoutSessions.prefix(20)
+        let recentBodyParts = recentSessions.flatMap { $0.trainedBodyParts }
+        let bodyPartCounts = Dictionary(grouping: recentBodyParts, by: { $0 })
+            .mapValues { $0.count }
+        
+        return BodyPart.requiredParts.sorted { bodyPart1, bodyPart2 in
+            bodyPartCounts[bodyPart1, default: 0] < bodyPartCounts[bodyPart2, default: 0]
+        }
+    }
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("おすすめのワークアウト")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        Text("最近のトレーニング履歴から、今日におすすめの部位を提案します")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal)
+                    
+                    LazyVStack(spacing: 12) {
+                        ForEach(suggestions, id: \.self) { bodyPart in
+                            WorkoutSuggestionRow(
+                                bodyPart: bodyPart,
+                                workoutSessions: workoutSessions,
+                                onSelect: {
+                                    onSuggestionSelected(bodyPart)
+                                }
+                            )
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+                .padding(.vertical)
+            }
+            .navigationTitle("ワークアウト提案")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("キャンセル") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct WorkoutSuggestionRow: View {
+    let bodyPart: BodyPart
+    let workoutSessions: [WorkoutSession]
+    let onSelect: () -> Void
+    
+    private var lastWorkoutDate: Date? {
+        workoutSessions.first { session in
+            session.trainedBodyParts.contains(bodyPart)
+        }?.date
+    }
+    
+    private var daysSinceLastWorkout: Int? {
+        guard let lastDate = lastWorkoutDate else { return nil }
+        return Calendar.current.dateComponents([.day], from: lastDate, to: Date()).day
+    }
+    
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(bodyPart.color)
+                    .frame(width: 40, height: 40)
+                    .overlay(
+                        Image(systemName: "figure.strengthtraining.traditional")
+                            .foregroundColor(.white)
+                            .font(.caption)
+                    )
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(bodyPart.displayName)
+                        .font(.headline)
+                        .fontWeight(.semibold)
+                    
+                    if let days = daysSinceLastWorkout {
+                        Text("\(days)日前")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("未実施")
+                            .font(.subheadline)
+                            .foregroundColor(.orange)
+                    }
+                    
+                    HStack {
+                        ForEach(bodyPart.primaryExercises.prefix(2), id: \.self) { exercise in
+                            Text(exercise)
+                                .font(.caption)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(bodyPart.color.opacity(0.2))
+                                .cornerRadius(4)
+                        }
+                    }
+                }
+                
+                Spacer()
+                
+                Image(systemName: "chevron.right")
+                    .foregroundColor(.secondary)
+            }
+            .padding()
+            .background(Color(.secondarySystemBackground))
+            .cornerRadius(12)
+        }
+        .buttonStyle(PlainButtonStyle())
     }
 }
 
@@ -563,27 +850,89 @@ struct TodayStatsCard: View {
 struct WeeklyStatsCard: View {
     let workoutSessions: [WorkoutSession]
     
-    private var weekStart: Date {
-        Calendar.current.dateInterval(of: .weekOfYear, for: Date())?.start ?? Date()
+    private var calendar: Calendar {
+        var cal = Calendar.current
+        cal.firstWeekday = 1 // 日曜日を週の開始日に設定（1=日曜日, 2=月曜日）
+        return cal
+    }
+    
+    private var weekInterval: DateInterval? {
+        calendar.dateInterval(of: .weekOfYear, for: Date())
     }
     
     private var weekSessions: [WorkoutSession] {
-        workoutSessions.filter { $0.date >= weekStart }
+        guard let interval = weekInterval else { return [] }
+        return workoutSessions.filter { session in
+            let sessionDay = calendar.startOfDay(for: session.date)
+            let weekStart = calendar.startOfDay(for: interval.start) // 日曜日 0:00
+            let weekEnd = calendar.startOfDay(for: interval.end)     // 次の日曜日 0:00
+            
+            // 日曜日 0:00 から 土曜日 23:59:59 まで
+            // sessionDay >= weekStart: 日曜日 0:00 以降
+            // sessionDay < weekEnd: 次の日曜日 0:00 未満（つまり土曜日 23:59:59 まで）
+            return sessionDay >= weekStart && sessionDay < weekEnd
+        }
     }
     
     private var weeklyVolume: Double {
         weekSessions.reduce(0) { $0 + $1.totalVolume }
     }
     
-    private var weeklyBodyParts: Set<BodyPart> {
-        Set(weekSessions.flatMap { $0.trainedBodyParts })
+    private var weeklyBodyPartCounts: [(bodyPart: BodyPart, count: Int)] {
+        let allBodyParts = weekSessions.flatMap { $0.trainedBodyParts }
+        let bodyPartCounts = Dictionary(grouping: allBodyParts, by: { $0 })
+            .mapValues { $0.count }
+        
+        return bodyPartCounts.map { (bodyPart: $0.key, count: $0.value) }
+            .sorted { $0.bodyPart.displayName < $1.bodyPart.displayName }
     }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("今週の統計")
-                .font(.headline)
-                .fontWeight(.bold)
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("今週の統計")
+                            .font(.headline)
+                            .fontWeight(.bold)
+                        
+                        Spacer()
+                        
+                        Text("今日: \(Date().formatted(date: .abbreviated, time: .omitted))")
+                            .font(.caption2)
+                            .foregroundColor(.blue)
+                    }
+                    
+                    // デバッグ情報（開発中のみ表示）
+                    if let interval = weekInterval {
+                        let weekEndDisplay = calendar.date(byAdding: .second, value: -1, to: interval.end) ?? interval.end
+                        Text("週の範囲: \(interval.start.formatted(date: .abbreviated, time: .shortened)) 〜 \(weekEndDisplay.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text("（日曜日 0:00 〜 土曜日 23:59）")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                // 詳細デバッグ情報：今週のワークアウト一覧
+                if !weekSessions.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("今週のワークアウト:")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                        ForEach(Array(weekSessions.enumerated()), id: \.offset) { index, session in
+                            let dayOfWeek = calendar.component(.weekday, from: session.date)
+                            let weekdayNames = ["", "日", "月", "火", "水", "木", "金", "土"]
+                            let exerciseCount = session.exercises.count
+                            let setCount = session.exercises.reduce(0) { $0 + $1.sets.count }
+                            Text("\(index + 1). \(session.date.formatted(date: .abbreviated, time: .shortened)) (\(weekdayNames[dayOfWeek])) - \(exerciseCount)種目, \(setCount)セット")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
+                    }
+                }
+            }
             
             if weekSessions.isEmpty {
                 Text("今週はまだワークアウトしていません")
@@ -613,20 +962,265 @@ struct WeeklyStatsCard: View {
                         }
                     }
                     
-                    HStack {
-                        Text("トレーニング部位:")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("部位別回数:")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         
-                        HStack(spacing: 4) {
-                            ForEach(Array(weeklyBodyParts).sorted(by: { $0.displayName < $1.displayName }), id: \.self) { bodyPart in
-                                Circle()
-                                    .fill(bodyPart.color)
-                                    .frame(width: 12, height: 12)
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 4) {
+                            ForEach(weeklyBodyPartCounts, id: \.bodyPart) { item in
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(item.bodyPart.color)
+                                        .frame(width: 8, height: 8)
+                                    
+                                    Text(item.bodyPart.displayName)
+                                        .font(.caption2)
+                                        .foregroundColor(.primary)
+                                    
+                                    Spacer()
+                                    
+                                    Text("\(item.count)回")
+                                        .font(.caption2)
+                                        .fontWeight(.medium)
+                                        .foregroundColor(.secondary)
+                                }
                             }
                         }
-                        
-                        Spacer()
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+}
+
+struct WeeklyTrendCard: View {
+    let sessions: [WorkoutSession]
+    @State private var showingVolume = false
+    
+    private var calendar: Calendar {
+        var cal = Calendar.current
+        cal.firstWeekday = 1 // 日曜日を週の開始日に設定
+        return cal
+    }
+    
+    private var weeklyData: [(weekLabel: String, count: Int, volume: Double)] {
+        let now = Date()
+        
+        // 過去8週間のデータを取得
+        var weeklyData: [(weekLabel: String, count: Int, volume: Double)] = []
+        
+        for weekOffset in (0..<8).reversed() {
+            guard let weekStart = calendar.date(byAdding: .weekOfYear, value: -weekOffset, to: now),
+                  let weekInterval = calendar.dateInterval(of: .weekOfYear, for: weekStart) else { continue }
+            
+            let weekSessions = sessions.filter { session in
+                let sessionDay = calendar.startOfDay(for: session.date)
+                let weekStart = calendar.startOfDay(for: weekInterval.start) // 日曜日 0:00
+                let weekEnd = calendar.startOfDay(for: weekInterval.end)     // 次の日曜日 0:00
+                
+                // 日曜日 0:00 から 土曜日 23:59:59 まで
+                // sessionDay >= weekStart: 日曜日 0:00 以降
+                // sessionDay < weekEnd: 次の日曜日 0:00 未満（つまり土曜日 23:59:59 まで）
+                return sessionDay >= weekStart && sessionDay < weekEnd
+            }
+            
+            let weekVolume = weekSessions.reduce(0.0) { $0 + $1.totalVolume }
+            
+            let formatter = DateFormatter()
+            formatter.dateFormat = "M/d"
+            formatter.locale = Locale(identifier: "ja_JP")
+            
+            let weekLabel = weekOffset == 0 ? "今週" : formatter.string(from: weekInterval.start)
+            weeklyData.append((weekLabel: weekLabel, count: weekSessions.count, volume: weekVolume))
+        }
+        
+        return weeklyData
+    }
+    
+    private var maxCount: Int {
+        weeklyData.map { $0.count }.max() ?? 1
+    }
+    
+    private var maxVolume: Double {
+        weeklyData.map { $0.volume }.max() ?? 1
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("週ごとのワークアウト推移（日曜〜土曜）")
+                    .font(.headline)
+                    .fontWeight(.bold)
+                
+                Spacer()
+                
+                // 切り替えボタン
+                Button(action: {
+                    showingVolume.toggle()
+                }) {
+                    Text(showingVolume ? "重量" : "回数")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.blue.opacity(0.2))
+                        .foregroundColor(.blue)
+                        .cornerRadius(4)
+                }
+            }
+            
+            if weeklyData.allSatisfy({ $0.count == 0 && $0.volume == 0 }) {
+                Text("まだ記録がありません")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            } else {
+                HStack(alignment: .bottom, spacing: 8) {
+                    ForEach(weeklyData, id: \.weekLabel) { data in
+                        VStack(spacing: 4) {
+                            // バーグラフ
+                            Rectangle()
+                                .fill(getBarColor(data: data))
+                                .frame(width: 30, height: getBarHeight(data: data))
+                                .cornerRadius(4)
+                            
+                            // 値表示
+                            Text(getDisplayValue(data: data))
+                                .font(.caption2)
+                                .fontWeight(.medium)
+                                .foregroundColor(getValueColor(data: data))
+                            
+                            // 週ラベル
+                            Text(data.weekLabel)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    private func getBarColor(data: (weekLabel: String, count: Int, volume: Double)) -> Color {
+        if showingVolume {
+            return data.volume > 0 ? Color.green : Color.gray.opacity(0.3)
+        } else {
+            return data.count > 0 ? Color.blue : Color.gray.opacity(0.3)
+        }
+    }
+    
+    private func getBarHeight(data: (weekLabel: String, count: Int, volume: Double)) -> CGFloat {
+        if showingVolume {
+            return max(CGFloat(data.volume) / CGFloat(maxVolume) * 60, 4)
+        } else {
+            return max(CGFloat(data.count) / CGFloat(maxCount) * 60, 4)
+        }
+    }
+    
+    private func getDisplayValue(data: (weekLabel: String, count: Int, volume: Double)) -> String {
+        if showingVolume {
+            return String(format: "%.0f", data.volume)
+        } else {
+            return "\(data.count)"
+        }
+    }
+    
+    private func getValueColor(data: (weekLabel: String, count: Int, volume: Double)) -> Color {
+        if showingVolume {
+            return data.volume > 0 ? .primary : .secondary
+        } else {
+            return data.count > 0 ? .primary : .secondary
+        }
+    }
+}
+
+struct DetailedBodyPartStatsCard: View {
+    let sessions: [WorkoutSession]
+    
+    private var bodyPartData: [(bodyPart: BodyPart, count: Int, volume: Double)] {
+        var bodyPartStats: [BodyPart: (count: Int, volume: Double)] = [:]
+        
+        for session in sessions {
+            for bodyPart in session.trainedBodyParts {
+                let currentStats = bodyPartStats[bodyPart] ?? (count: 0, volume: 0.0)
+                let bodyPartVolume = session.exercises
+                    .filter { $0.bodyPart == bodyPart }
+                    .reduce(0.0) { $0 + $1.totalVolume }
+                
+                bodyPartStats[bodyPart] = (
+                    count: currentStats.count + 1,
+                    volume: currentStats.volume + bodyPartVolume
+                )
+            }
+        }
+        
+        return bodyPartStats.map { (bodyPart: $0.key, count: $0.value.count, volume: $0.value.volume) }
+            .sorted { $0.count > $1.count }
+    }
+    
+    private var maxCount: Int {
+        bodyPartData.map { $0.count }.max() ?? 1
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("部位別詳細統計")
+                .font(.headline)
+                .fontWeight(.bold)
+            
+            if bodyPartData.isEmpty {
+                Text("まだ記録がありません")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            } else {
+                LazyVStack(spacing: 12) {
+                    ForEach(bodyPartData, id: \.bodyPart) { data in
+                        VStack(alignment: .leading, spacing: 6) {
+                            // 部位名と統計
+                            HStack {
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(data.bodyPart.color)
+                                        .frame(width: 16, height: 16)
+                                    
+                                    Text(data.bodyPart.displayName)
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                }
+                                
+                                Spacer()
+                                
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text("\(data.count)回")
+                                        .font(.subheadline)
+                                        .fontWeight(.bold)
+                                    
+                                    Text("\(String(format: "%.0f", data.volume))kg")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            
+                            // 横バーグラフ
+                            HStack(spacing: 4) {
+                                Rectangle()
+                                    .fill(data.bodyPart.color.opacity(0.8))
+                                    .frame(height: 8)
+                                    .frame(width: CGFloat(data.count) / CGFloat(maxCount) * 200)
+                                    .cornerRadius(4)
+                                
+                                Spacer()
+                            }
+                        }
+                        .padding(.vertical, 4)
                     }
                 }
             }
@@ -841,7 +1435,7 @@ struct ImprovedWorkoutSessionRow: View {
                 Spacer()
                 
                 VStack(alignment: .trailing) {
-                    Text(String(format: "%.0fkg", session.totalVolume))
+                    Text(String(format: "%.1fkg", session.totalVolume))
                         .font(.title3)
                         .fontWeight(.bold)
                         .foregroundColor(.green)
@@ -1196,80 +1790,7 @@ struct MonthlyStatsCard: View {
     }
 }
 
-struct DetailedBodyPartStatsCard: View {
-    let sessions: [WorkoutSession]
-    
-    private var bodyPartStats: [(bodyPart: BodyPart, count: Int, totalVolume: Double)] {
-        var stats: [BodyPart: (count: Int, volume: Double)] = [:]
-        
-        for session in sessions {
-            for bodyPart in session.trainedBodyParts {
-                let sessionVolume = session.exercises
-                    .filter { $0.bodyPart == bodyPart }
-                    .reduce(0) { $0 + $1.totalVolume }
-                
-                if let existing = stats[bodyPart] {
-                    stats[bodyPart] = (count: existing.count + 1, volume: existing.volume + sessionVolume)
-                } else {
-                    stats[bodyPart] = (count: 1, volume: sessionVolume)
-                }
-            }
-        }
-        
-        return stats.map { (bodyPart: $0.key, count: $0.value.count, totalVolume: $0.value.volume) }
-            .sorted { $0.count > $1.count }
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("部位別詳細統計")
-                .font(.headline)
-                .fontWeight(.bold)
-            
-            if bodyPartStats.isEmpty {
-                Text("まだ記録がありません")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            } else {
-                ForEach(bodyPartStats, id: \.bodyPart) { stat in
-                    VStack(spacing: 6) {
-                        HStack {
-                            Circle()
-                                .fill(stat.bodyPart.color)
-                                .frame(width: 12, height: 12)
-                            
-                            Text(stat.bodyPart.displayName)
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-                            
-                            Spacer()
-                            
-                            Text("\(stat.count)回")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        
-                        HStack {
-                            Text("総重量: \(String(format: "%.0f", stat.totalVolume))kg")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            
-                            Spacer()
-                            
-                            Text("平均: \(String(format: "%.0f", stat.totalVolume / Double(stat.count)))kg")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-        }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
-    }
-}
+
 
 struct ConsistencyCard: View {
     let sessions: [WorkoutSession]
@@ -1484,8 +2005,18 @@ struct WorkoutSessionsForDateView: View {
     let date: Date
     let sessions: [WorkoutSession]
     
+    private let calendar: Calendar = {
+        var cal = Calendar.current
+        cal.timeZone = TimeZone.current
+        return cal
+    }()
+    
     private var sessionsForDate: [WorkoutSession] {
-        sessions.filter { Calendar.current.isDate($0.date, inSameDayAs: date) }
+        sessions.filter { session in
+            let sessionNormalized = calendar.startOfDay(for: session.date)
+            let dateNormalized = calendar.startOfDay(for: date)
+            return calendar.isDate(sessionNormalized, inSameDayAs: dateNormalized)
+        }
     }
     
     var body: some View {
@@ -1592,26 +2123,38 @@ struct CustomCalendarView: View {
     let workoutSessions: [WorkoutSession]
     let onDateTap: (Date) -> Void
     
-    private let calendar = Calendar.current
+    private let calendar: Calendar = {
+        var cal = Calendar.current
+        cal.timeZone = TimeZone.current // 明示的に現在のタイムゾーンを設定
+        return cal
+    }()
+    
     private let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy年MM月"
+        formatter.timeZone = TimeZone.current // タイムゾーンを明示的に設定
         return formatter
     }()
     
     private var monthDays: [Date] {
-        guard let monthInterval = calendar.dateInterval(of: .month, for: currentMonth) else { return [] }
+        // タイムゾーンを明示的に設定したカレンダーを使用
+        var monthCalendar = Calendar.current
+        monthCalendar.timeZone = TimeZone.current
         
-        let startDate = monthInterval.start
-        guard let endDate = calendar.date(byAdding: DateComponents(month: 1, day: -1), to: startDate) else { return [] }
+        // 現在の月の開始日を取得し、startOfDayで正規化
+        let startOfMonth = monthCalendar.startOfDay(for: monthCalendar.dateInterval(of: .month, for: currentMonth)?.start ?? currentMonth)
+        
+        // 月の日数を取得
+        guard let range = monthCalendar.range(of: .day, in: .month, for: currentMonth) else { return [] }
         
         var days: [Date] = []
-        var date = startDate
         
-        while date <= endDate {
-            days.append(date)
-            guard let nextDate = calendar.date(byAdding: .day, value: 1, to: date) else { break }
-            date = nextDate
+        // 月の各日を生成（すべてstartOfDayで正規化）
+        for day in 1...range.count {
+            if let date = monthCalendar.date(byAdding: .day, value: day - 1, to: startOfMonth) {
+                let normalizedDate = monthCalendar.startOfDay(for: date)
+                days.append(normalizedDate)
+            }
         }
         
         return days
@@ -1696,7 +2239,15 @@ struct CustomCalendarView: View {
                             date: date,
                             isSelected: calendar.isDate(date, inSameDayAs: selectedDate),
                             workoutBodyParts: getWorkoutBodyParts(for: date),
-                            onTap: { onDateTap(date) }
+                            onTap: { 
+                                // 日付を確実にstartOfDayで正規化してから渡す
+                                // タイムゾーンを明示的に設定
+                                var tapCalendar = Calendar.current
+                                tapCalendar.timeZone = TimeZone.current
+                                let normalizedDate = tapCalendar.startOfDay(for: date)
+                                print("CustomCalendarView tap - Original: \(date), Normalized: \(normalizedDate)")
+                                onDateTap(normalizedDate) 
+                            }
                         )
                     } else {
                         Rectangle()
@@ -1858,40 +2409,186 @@ struct BodyPartFilterWithColorView: View {
 struct WorkoutDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    let date: Date
+    let initialDate: Date
     let sessions: [WorkoutSession]
-    let onAddWorkout: () -> Void
+    let onAddWorkout: (Date) -> Void
     
+    @State private var currentDate: Date
     @State private var showingEditSheet = false
     @State private var showingDeleteAlert = false
     @State private var sessionToEdit: WorkoutSession?
     @State private var sessionToDelete: WorkoutSession?
     
+    // WorkoutDetailSheet専用のカレンダー設定（タイムゾーン統一）
+    private let calendar: Calendar = {
+        var cal = Calendar.current
+        cal.timeZone = TimeZone.current
+        return cal
+    }()
+    
+    init(date: Date, sessions: [WorkoutSession], onAddWorkout: @escaping (Date) -> Void) {
+        self.initialDate = date
+        self.sessions = sessions
+        self.onAddWorkout = onAddWorkout
+        // 日付を確実に設定するためにタイムゾーンを明示的に設定したCalendarを使って正規化
+        var calendarForInit = Calendar.current
+        calendarForInit.timeZone = TimeZone.current
+        let normalizedDate = calendarForInit.startOfDay(for: date)
+        self._currentDate = State(initialValue: normalizedDate)
+        print("WorkoutDetailSheet initialized with date: \(normalizedDate)") // デバッグ用
+        print("WorkoutDetailSheet init TimeZone: \(calendarForInit.timeZone.identifier)")
+    }
+    
     private var sessionsForDate: [WorkoutSession] {
-        sessions.filter { Calendar.current.isDate($0.date, inSameDayAs: date) }
+        // タイムゾーンを明示的に設定
+        var normalizeCalendar = Calendar.current
+        normalizeCalendar.timeZone = TimeZone.current
+        
+        let filtered = sessions.filter { session in
+            let sessionNormalized = normalizeCalendar.startOfDay(for: session.date)
+            let currentNormalized = normalizeCalendar.startOfDay(for: currentDate)
+            let isMatch = normalizeCalendar.isDate(sessionNormalized, inSameDayAs: currentNormalized)
+            
+            // デバッグ情報
+            if session == sessions.first {
+                print("=== WorkoutDetailSheet sessionsForDate Debug ===")
+                print("currentDate: \(currentDate)")
+                print("currentNormalized: \(currentNormalized)")
+                print("TimeZone for filtering: \(normalizeCalendar.timeZone.identifier)")
+                print("Total sessions: \(sessions.count)")
+                for (index, sess) in sessions.enumerated() {
+                    let normalized = normalizeCalendar.startOfDay(for: sess.date)
+                    let match = normalizeCalendar.isDate(normalized, inSameDayAs: currentNormalized)
+                    print("Session \(index): \(sess.date) -> \(normalized) (match: \(match))")
+                }
+            }
+            
+            return isMatch
+        }
+        
+        print("Filtered sessions count for \(currentDate): \(filtered.count)")
+        return filtered
+    }
+    
+    private func mergeSessionsForDate() {
+        guard sessionsForDate.count > 1 else { return }
+        
+        // 最初のセッションをメインセッションとして使用
+        let mainSession = sessionsForDate[0]
+        let otherSessions = Array(sessionsForDate.dropFirst())
+        
+        // 他のセッションの種目をメインセッションに統合
+        for session in otherSessions {
+            for exercise in session.exercises {
+                // 同じ種目が既にメインセッションにあるかチェック
+                if let existingExercise = mainSession.exercises.first(where: { 
+                    $0.name == exercise.name && $0.bodyPart == exercise.bodyPart 
+                }) {
+                    // 既存の種目にセットを追加
+                    existingExercise.sets.append(contentsOf: exercise.sets)
+                } else {
+                    // 新しい種目として追加
+                    mainSession.exercises.append(exercise)
+                }
+            }
+            
+            // 不要なセッションを削除
+            modelContext.delete(session)
+        }
+        
+        // 変更を保存
+        do {
+            try modelContext.save()
+        } catch {
+            print("Failed to merge sessions: \(error)")
+        }
     }
     
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    // 日付ヘッダー
+                    // 日付ヘッダー（ナビゲーション付き）
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(date.formatted(date: .complete, time: .omitted))
-                            .font(.title2)
-                            .fontWeight(.bold)
+                        HStack {
+                            Button(action: {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    if let newDate = calendar.date(byAdding: .day, value: -1, to: currentDate) {
+                                        currentDate = calendar.startOfDay(for: newDate)
+                                        print("WorkoutDetailSheet date changed to: \(currentDate)")
+                                    }
+                                }
+                            }) {
+                                Image(systemName: "chevron.left")
+                                    .font(.title2)
+                                    .foregroundColor(.blue)
+                            }
+                            
+                            Spacer()
+                            
+                            VStack {
+                                Text(currentDate.formatted(date: .complete, time: .omitted))
+                                    .font(.title2)
+                                    .fontWeight(.bold)
+                                    .multilineTextAlignment(.center)
+                                
+                                if Calendar.current.isDateInToday(currentDate) {
+                                    Text("今日")
+                                        .font(.caption)
+                                        .foregroundColor(.blue)
+                                        .fontWeight(.medium)
+                                }
+                            }
+                            
+                            Spacer()
+                            
+                            Button(action: {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    if let newDate = calendar.date(byAdding: .day, value: 1, to: currentDate) {
+                                        currentDate = calendar.startOfDay(for: newDate)
+                                        print("WorkoutDetailSheet date changed to: \(currentDate)")
+                                    }
+                                }
+                            }) {
+                                Image(systemName: "chevron.right")
+                                    .font(.title2)
+                                    .foregroundColor(.blue)
+                            }
+                        }
                         
                         if !sessionsForDate.isEmpty {
                             let totalVolume = sessionsForDate.reduce(0) { $0 + $1.totalVolume }
                             let totalSets = sessionsForDate.flatMap { $0.exercises }.flatMap { $0.sets }.count
                             
-                            HStack {
-                                Label("\(totalSets)セット", systemImage: "repeat")
-                                Spacer()
-                                Label(String(format: "%.0fkg", totalVolume), systemImage: "scalemass")
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Label("\(totalSets)セット", systemImage: "repeat")
+                                    Spacer()
+                                    Label(String(format: "%.1fkg", totalVolume), systemImage: "scalemass")
+                                }
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                
+                                // 統合ボタン（複数セッションがある場合のみ表示）
+                                if sessionsForDate.count > 1 {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("⚠️ 同じ日に複数のワークアウトが保存されています")
+                                            .font(.caption)
+                                            .foregroundColor(.orange)
+                                        
+                                        Button("1つのワークアウトに統合") {
+                                            mergeSessionsForDate()
+                                        }
+                                        .font(.caption)
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Color.blue)
+                                        .cornerRadius(6)
+                                    }
+                                    .padding(.top, 4)
+                                }
                             }
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
                         }
                     }
                     .padding(.horizontal)
@@ -1936,6 +2633,29 @@ struct WorkoutDetailSheet: View {
                     Spacer(minLength: 20)
                 }
             }
+            .gesture(
+                DragGesture()
+                    .onEnded { value in
+                        let threshold: CGFloat = 50
+                        if value.translation.width > threshold {
+                            // 右スワイプ：前の日
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                if let newDate = calendar.date(byAdding: .day, value: -1, to: currentDate) {
+                                    currentDate = calendar.startOfDay(for: newDate)
+                                    print("WorkoutDetailSheet swiped to: \(currentDate)")
+                                }
+                            }
+                        } else if value.translation.width < -threshold {
+                            // 左スワイプ：次の日
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                if let newDate = calendar.date(byAdding: .day, value: 1, to: currentDate) {
+                                    currentDate = calendar.startOfDay(for: newDate)
+                                    print("WorkoutDetailSheet swiped to: \(currentDate)")
+                                }
+                            }
+                        }
+                    }
+            )
             .navigationTitle("ワークアウト詳細")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1947,7 +2667,7 @@ struct WorkoutDetailSheet: View {
                 
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("ワークアウト追加") {
-                        onAddWorkout()
+                        onAddWorkout(currentDate)
                         dismiss()
                     }
                     .foregroundColor(.blue)

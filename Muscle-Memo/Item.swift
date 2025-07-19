@@ -9,6 +9,30 @@ import Foundation
 import SwiftData
 import SwiftUI
 
+// カスタム種目管理モデル
+@Model
+class CustomExercise {
+    var name: String
+    var bodyPart: BodyPart
+    var usageCount: Int
+    var lastUsed: Date
+    var isCustom: Bool // カスタム種目かデフォルト種目か
+    
+    init(name: String, bodyPart: BodyPart, isCustom: Bool = true) {
+        self.name = name
+        self.bodyPart = bodyPart
+        self.usageCount = 0
+        self.lastUsed = Date()
+        self.isCustom = isCustom
+    }
+    
+    // 使用時に呼び出すメソッド
+    func recordUsage() {
+        usageCount += 1
+        lastUsed = Date()
+    }
+}
+
 // 筋肉部位の列挙型
 enum BodyPart: String, CaseIterable, Codable {
     case chest = "胸"
@@ -88,6 +112,41 @@ enum BodyPart: String, CaseIterable, Codable {
         }
     }
     
+    // 使用頻度に基づいて並び替えられた種目リストを取得
+    func getSortedExercises(customExercises: [CustomExercise]) -> [String] {
+        let thisBodyPartCustomExercises = customExercises.filter { $0.bodyPart == self }
+        
+        // デフォルト種目を CustomExercise として作成（まだ記録されていない場合）
+        var allExercises: [CustomExercise] = []
+        
+        // 既存のカスタム種目を追加
+        allExercises.append(contentsOf: thisBodyPartCustomExercises)
+        
+        // デフォルト種目を追加（まだ記録されていない場合のみ）
+        for exerciseName in defaultExercises {
+            if !thisBodyPartCustomExercises.contains(where: { $0.name == exerciseName }) {
+                let defaultExercise = CustomExercise(name: exerciseName, bodyPart: self, isCustom: false)
+                allExercises.append(defaultExercise)
+            }
+        }
+        
+        // 使用頻度でソート（頻度が高い順、同じ場合は最近使用した順）
+        allExercises.sort { first, second in
+            if first.usageCount == second.usageCount {
+                return first.lastUsed > second.lastUsed
+            }
+            return first.usageCount > second.usageCount
+        }
+        
+        return allExercises.map { $0.name }
+    }
+    
+    // よく使用される上位5種目を取得
+    func getTopExercises(customExercises: [CustomExercise]) -> [String] {
+        let sortedExercises = getSortedExercises(customExercises: customExercises)
+        return Array(sortedExercises.prefix(5))
+    }
+
     // 各部位の代表的なエクササイズ（全種目）
     var defaultExercises: [String] {
         switch self {
@@ -214,6 +273,11 @@ final class Exercise {
     func addSet(weight: Double, reps: Int, memo: String = "") {
         let newSet = ExerciseSet(weight: weight, reps: reps, memo: memo)
         sets.append(newSet)
+    }
+    
+    func removeSet(at index: Int) {
+        guard index >= 0 && index < sets.count else { return }
+        sets.remove(at: index)
     }
     
     var totalVolume: Double {

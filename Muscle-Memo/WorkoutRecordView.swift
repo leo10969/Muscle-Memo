@@ -47,6 +47,12 @@ struct NewWorkoutSheet: View {
                             },
                             onAddSet: { exercise in
                                 exerciseForSetInput = exercise
+                            },
+                            onDeleteExercise: { exercise in
+                                currentWorkout.removeExercise(exercise)
+                            },
+                            onMoveExercise: { indices, newOffset in
+                                moveExercise(from: indices, to: newOffset)
                             }
                         )
                         
@@ -98,11 +104,673 @@ struct NewWorkoutSheet: View {
         }
     }
     
+    private func moveExercise(from source: IndexSet, to destination: Int) {
+        let bodyPartExercises = currentWorkout.exercises.filter { $0.bodyPart == selectedBodyPart }
+        var allExercises = currentWorkout.exercises
+        
+        // 選択中の部位の種目のみを移動
+        var filteredExercises = bodyPartExercises
+        filteredExercises.move(fromOffsets: source, toOffset: destination)
+        
+        // 他の部位の種目を除外して、移動後の順序で全体を再構築
+        let otherExercises = allExercises.filter { $0.bodyPart != selectedBodyPart }
+        
+        // 選択中の部位の種目を挿入位置を考慮して全体リストに統合
+        var newExercises: [Exercise] = []
+        var bodyPartInserted = false
+        
+        for exercise in allExercises {
+            if exercise.bodyPart == selectedBodyPart && !bodyPartInserted {
+                newExercises.append(contentsOf: filteredExercises)
+                bodyPartInserted = true
+            } else if exercise.bodyPart != selectedBodyPart {
+                newExercises.append(exercise)
+            }
+        }
+        
+        if !bodyPartInserted {
+            newExercises.append(contentsOf: filteredExercises)
+        }
+        
+        currentWorkout.exercises = newExercises
+    }
+    
     private func saveWorkout() {
+        // セットが空の種目を除外
+        currentWorkout.exercises = currentWorkout.exercises.filter { !$0.sets.isEmpty }
+        
         guard !currentWorkout.exercises.isEmpty else { return }
         
-        modelContext.insert(currentWorkout)
+        // 同じ日付の既存セッションがあるかチェック
+        mergeOrCreateWorkout()
         dismiss()
+    }
+    
+    private func mergeOrCreateWorkout() {
+        let calendar = Calendar.current
+        let existingSession = allWorkoutSessions.first { session in
+            calendar.isDate(session.date, inSameDayAs: currentWorkout.date)
+        }
+        
+        if let existingSession = existingSession {
+            // 既存セッションに種目を統合
+            for exercise in currentWorkout.exercises {
+                if let existingExercise = existingSession.exercises.first(where: { 
+                    $0.name == exercise.name && $0.bodyPart == exercise.bodyPart 
+                }) {
+                    // 既存の種目にセットを追加
+                    existingExercise.sets.append(contentsOf: exercise.sets)
+                } else {
+                    // 新しい種目として追加
+                    existingSession.exercises.append(exercise)
+                }
+            }
+        } else {
+            // 新しいセッションとして保存
+            modelContext.insert(currentWorkout)
+        }
+    }
+}
+
+struct NewWorkoutSheetWithBodyPart: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \WorkoutSession.date, order: .reverse) private var allWorkoutSessions: [WorkoutSession]
+    
+    let initialBodyPart: BodyPart
+    let initialDate: Date?
+    @State private var currentWorkout = WorkoutSession()
+    @State private var selectedBodyPart: BodyPart
+    @State private var currentExercise: Exercise?
+    @State private var showingExerciseSheet = false
+    @State private var showingAddSetSheet = false
+    @State private var exerciseForSetInput: Exercise?
+    
+    init(initialBodyPart: BodyPart, initialDate: Date? = nil) {
+        self.initialBodyPart = initialBodyPart
+        self.initialDate = initialDate
+        _selectedBodyPart = State(initialValue: initialBodyPart)
+        _currentWorkout = State(initialValue: WorkoutSession(date: initialDate ?? Date()))
+    }
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // 部位選択（固定）
+                BodyPartPicker(selectedBodyPart: $selectedBodyPart)
+                
+                // スクロール可能なコンテンツ
+                ScrollView {
+                    VStack(spacing: 0) {
+                        // 前回の記録表示
+                        PreviousWorkoutDisplay(bodyPart: selectedBodyPart, sessions: allWorkoutSessions)
+                        
+                        // 現在のワークアウト
+                        CurrentWorkoutView(
+                            workout: currentWorkout,
+                            selectedBodyPart: selectedBodyPart,
+                            onAddExercise: {
+                                showingExerciseSheet = true
+                            },
+                            onAddSet: { exercise in
+                                exerciseForSetInput = exercise
+                            },
+                            onDeleteExercise: { exercise in
+                                currentWorkout.removeExercise(exercise)
+                            },
+                            onMoveExercise: { indices, newOffset in
+                                moveExercise(from: indices, to: newOffset)
+                            }
+                        )
+                        
+                        // 保存ボタンの余白確保
+                        Spacer(minLength: 100)
+                    }
+                }
+                
+                // 保存ボタン（固定）
+                SaveWorkoutButton(workout: currentWorkout) {
+                    saveWorkout()
+                }
+            }
+            .navigationTitle("ワークアウト記録")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("キャンセル") {
+                        dismiss()
+                    }
+                }
+            }
+            .sheet(isPresented: $showingExerciseSheet) {
+                ExerciseSelectionSheet(
+                    bodyPart: selectedBodyPart,
+                    onSelect: { exerciseName in
+                        addExercise(name: exerciseName)
+                    }
+                )
+            }
+            .sheet(item: $exerciseForSetInput) { exercise in
+                AddSetSheet(exercise: exercise)
+            }
+        }
+    }
+    
+    private func addExercise(name: String) {
+        let exercise = Exercise(name: name, bodyPart: selectedBodyPart)
+        
+        // SwiftDataのcontextに明示的に挿入
+        modelContext.insert(exercise)
+        
+        currentWorkout.addExercise(exercise)
+        showingExerciseSheet = false
+        
+        // 種目追加後、直接セット入力画面を表示
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            exerciseForSetInput = exercise
+        }
+    }
+    
+    private func moveExercise(from source: IndexSet, to destination: Int) {
+        let bodyPartExercises = currentWorkout.exercises.filter { $0.bodyPart == selectedBodyPart }
+        var allExercises = currentWorkout.exercises
+        
+        // 選択中の部位の種目のみを移動
+        var filteredExercises = bodyPartExercises
+        filteredExercises.move(fromOffsets: source, toOffset: destination)
+        
+        // 他の部位の種目を除外して、移動後の順序で全体を再構築
+        let otherExercises = allExercises.filter { $0.bodyPart != selectedBodyPart }
+        
+        // 選択中の部位の種目を挿入位置を考慮して全体リストに統合
+        var newExercises: [Exercise] = []
+        var bodyPartInserted = false
+        
+        for exercise in allExercises {
+            if exercise.bodyPart == selectedBodyPart && !bodyPartInserted {
+                newExercises.append(contentsOf: filteredExercises)
+                bodyPartInserted = true
+            } else if exercise.bodyPart != selectedBodyPart {
+                newExercises.append(exercise)
+            }
+        }
+        
+        if !bodyPartInserted {
+            newExercises.append(contentsOf: filteredExercises)
+        }
+        
+        currentWorkout.exercises = newExercises
+    }
+    
+    private func saveWorkout() {
+        // セットが空の種目を除外
+        currentWorkout.exercises = currentWorkout.exercises.filter { !$0.sets.isEmpty }
+        
+        guard !currentWorkout.exercises.isEmpty else { return }
+        
+        // 同じ日付の既存セッションがあるかチェック
+        mergeOrCreateWorkout()
+        dismiss()
+    }
+    
+    private func mergeOrCreateWorkout() {
+        let calendar = Calendar.current
+        let existingSession = allWorkoutSessions.first { session in
+            calendar.isDate(session.date, inSameDayAs: currentWorkout.date)
+        }
+        
+        if let existingSession = existingSession {
+            // 既存セッションに種目を統合
+            for exercise in currentWorkout.exercises {
+                if let existingExercise = existingSession.exercises.first(where: { 
+                    $0.name == exercise.name && $0.bodyPart == exercise.bodyPart 
+                }) {
+                    // 既存の種目にセットを追加
+                    existingExercise.sets.append(contentsOf: exercise.sets)
+                } else {
+                    // 新しい種目として追加
+                    existingSession.exercises.append(exercise)
+                }
+            }
+        } else {
+            // 新しいセッションとして保存
+            modelContext.insert(currentWorkout)
+        }
+    }
+}
+
+struct NewWorkoutSheetWithSuggestion: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \WorkoutSession.date, order: .reverse) private var allWorkoutSessions: [WorkoutSession]
+    
+    let suggestedBodyPart: BodyPart
+    @State private var currentWorkout = WorkoutSession()
+    @State private var selectedBodyPart: BodyPart
+    @State private var currentExercise: Exercise?
+    @State private var showingExerciseSheet = false
+    @State private var showingAddSetSheet = false
+    @State private var exerciseForSetInput: Exercise?
+    
+    init(suggestedBodyPart: BodyPart) {
+        self.suggestedBodyPart = suggestedBodyPart
+        _selectedBodyPart = State(initialValue: suggestedBodyPart)
+        _currentWorkout = State(initialValue: WorkoutSession())
+    }
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // 提案ヘッダー
+                VStack(spacing: 8) {
+                    HStack {
+                        Image(systemName: "lightbulb.fill")
+                            .foregroundColor(.yellow)
+                        Text("提案されたワークアウト")
+                            .font(.headline)
+                            .fontWeight(.semibold)
+                        Spacer()
+                    }
+                    
+                    HStack {
+                        Text("\(suggestedBodyPart.displayName)のトレーニングを開始します")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                }
+                .padding()
+                .background(Color.yellow.opacity(0.1))
+                
+                // 部位選択（固定）
+                BodyPartPicker(selectedBodyPart: $selectedBodyPart)
+                
+                // スクロール可能なコンテンツ
+                ScrollView {
+                    VStack(spacing: 0) {
+                                                 // 前回の記録表示
+                         PreviousWorkoutDisplay(bodyPart: selectedBodyPart, sessions: allWorkoutSessions)
+                         
+                         // 現在のワークアウト
+                         CurrentWorkoutView(
+                             workout: currentWorkout,
+                             selectedBodyPart: selectedBodyPart,
+                             onAddExercise: {
+                                 showingExerciseSheet = true
+                             },
+                             onAddSet: { exercise in
+                                 exerciseForSetInput = exercise
+                             },
+                             onDeleteExercise: { exercise in
+                                 currentWorkout.removeExercise(exercise)
+                             },
+                             onMoveExercise: { indices, newOffset in
+                                 moveExercise(from: indices, to: newOffset)
+                             }
+                         )
+                        
+                        // 保存ボタンの余白確保
+                        Spacer(minLength: 100)
+                    }
+                }
+                
+                // 保存ボタン（固定）
+                SaveWorkoutButton(workout: currentWorkout) {
+                    saveWorkout()
+                }
+            }
+            .navigationTitle("ワークアウト記録")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("キャンセル") {
+                        dismiss()
+                    }
+                }
+            }
+            .sheet(isPresented: $showingExerciseSheet) {
+                ExerciseSelectionSheet(
+                    bodyPart: selectedBodyPart,
+                    onSelect: { exerciseName in
+                        addExercise(name: exerciseName)
+                    }
+                )
+            }
+            .sheet(item: $exerciseForSetInput) { exercise in
+                AddSetSheet(exercise: exercise)
+            }
+        }
+    }
+    
+    private func addExercise(name: String) {
+        let exercise = Exercise(name: name, bodyPart: selectedBodyPart)
+        
+        // SwiftDataのcontextに明示的に挿入
+        modelContext.insert(exercise)
+        
+        currentWorkout.addExercise(exercise)
+        showingExerciseSheet = false
+        
+        // 種目追加後、直接セット入力画面を表示
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            exerciseForSetInput = exercise
+        }
+    }
+    
+    private func moveExercise(from source: IndexSet, to destination: Int) {
+        let bodyPartExercises = currentWorkout.exercises.filter { $0.bodyPart == selectedBodyPart }
+        var allExercises = currentWorkout.exercises
+        
+        // 選択中の部位の種目のみを移動
+        var filteredExercises = bodyPartExercises
+        filteredExercises.move(fromOffsets: source, toOffset: destination)
+        
+        // 他の部位の種目を除外して、移動後の順序で全体を再構築
+        let otherExercises = allExercises.filter { $0.bodyPart != selectedBodyPart }
+        
+        // 選択中の部位の種目を挿入位置を考慮して全体リストに統合
+        var newExercises: [Exercise] = []
+        var bodyPartInserted = false
+        
+        for exercise in allExercises {
+            if exercise.bodyPart == selectedBodyPart && !bodyPartInserted {
+                newExercises.append(contentsOf: filteredExercises)
+                bodyPartInserted = true
+            } else if exercise.bodyPart != selectedBodyPart {
+                newExercises.append(exercise)
+            }
+        }
+        
+        if !bodyPartInserted {
+            newExercises.append(contentsOf: filteredExercises)
+        }
+        
+        currentWorkout.exercises = newExercises
+    }
+    
+    private func saveWorkout() {
+        // セットが空の種目を除外
+        currentWorkout.exercises = currentWorkout.exercises.filter { !$0.sets.isEmpty }
+        
+        guard !currentWorkout.exercises.isEmpty else { return }
+        
+        // 同じ日付の既存セッションがあるかチェック
+        mergeOrCreateWorkout()
+        dismiss()
+    }
+    
+    private func mergeOrCreateWorkout() {
+        let calendar = Calendar.current
+        let existingSession = allWorkoutSessions.first { session in
+            calendar.isDate(session.date, inSameDayAs: currentWorkout.date)
+        }
+        
+        if let existingSession = existingSession {
+            // 既存セッションに種目を統合
+            for exercise in currentWorkout.exercises {
+                if let existingExercise = existingSession.exercises.first(where: { 
+                    $0.name == exercise.name && $0.bodyPart == exercise.bodyPart 
+                }) {
+                    // 既存の種目にセットを追加
+                    existingExercise.sets.append(contentsOf: exercise.sets)
+                } else {
+                    // 新しい種目として追加
+                    existingSession.exercises.append(exercise)
+                }
+            }
+        } else {
+            // 新しいセッションとして保存
+            modelContext.insert(currentWorkout)
+        }
+    }
+}
+
+struct QuickWorkoutSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    
+    let suggestedBodyPart: BodyPart
+    let allSessions: [WorkoutSession]
+    @State private var currentWorkout = WorkoutSession()
+    @State private var selectedBodyPart: BodyPart
+    @State private var showingExerciseSheet = false
+    @State private var exerciseForSetInput: Exercise?
+    @State private var isLoaded = false
+    
+    init(suggestedBodyPart: BodyPart, allSessions: [WorkoutSession]) {
+        self.suggestedBodyPart = suggestedBodyPart
+        self.allSessions = allSessions
+        _selectedBodyPart = State(initialValue: suggestedBodyPart)
+        _currentWorkout = State(initialValue: WorkoutSession())
+    }
+    
+    private var previousWorkout: WorkoutSession? {
+        let calendar = Calendar.current
+        let today = Date()
+        
+        return allSessions.first { session in
+            // 当日以前のセッションで、指定の部位を含むもの
+            !calendar.isDate(session.date, inSameDayAs: today) &&
+            session.date < today &&
+            session.trainedBodyParts.contains(suggestedBodyPart)
+        }
+    }
+    
+    private var hasCompletedSets: Bool {
+        !currentWorkout.exercises.isEmpty && 
+        currentWorkout.exercises.allSatisfy { exercise in
+            !exercise.sets.isEmpty
+        }
+    }
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // 提案ヘッダー
+                VStack(spacing: 8) {
+                    HStack {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .foregroundColor(.orange)
+                        Text("前回の種目を再利用")
+                            .font(.headline)
+                            .fontWeight(.semibold)
+                        Spacer()
+                    }
+                    
+                    HStack {
+                        if let previousWorkout = previousWorkout {
+                            Text("\(suggestedBodyPart.displayName)の前回の種目でトレーニングを開始します")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("\(suggestedBodyPart.displayName)の新しいトレーニングを開始します")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                    }
+                }
+                .padding()
+                .background(Color.orange.opacity(0.1))
+                
+                // 部位選択（固定）
+                BodyPartPicker(selectedBodyPart: $selectedBodyPart)
+                
+                // スクロール可能なコンテンツ
+                ScrollView {
+                    VStack(spacing: 0) {
+                        // 前回の記録表示
+                        PreviousWorkoutDisplay(bodyPart: selectedBodyPart, sessions: allSessions)
+                        
+                        // 現在のワークアウト
+                        CurrentWorkoutView(
+                            workout: currentWorkout,
+                            selectedBodyPart: selectedBodyPart,
+                            onAddExercise: {
+                                showingExerciseSheet = true
+                            },
+                            onAddSet: { exercise in
+                                exerciseForSetInput = exercise
+                            },
+                            onDeleteExercise: { exercise in
+                                currentWorkout.removeExercise(exercise)
+                            },
+                            onMoveExercise: { indices, newOffset in
+                                moveExercise(from: indices, to: newOffset)
+                            }
+                        )
+                        
+                        // 保存ボタンの余白確保
+                        Spacer(minLength: 100)
+                    }
+                }
+                
+                // 保存ボタン（固定）
+                VStack(spacing: 8) {
+                    if hasCompletedSets {
+                        Button("ワークアウトを保存") {
+                            saveWorkout()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Text("種目にセットを追加してワークアウトを完了させてください")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+                }
+                .padding()
+                .background(Color(.systemGray6))
+            }
+            .navigationTitle("クイックワークアウト")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("キャンセル") {
+                        dismiss()
+                    }
+                }
+            }
+            .sheet(isPresented: $showingExerciseSheet) {
+                ExerciseSelectionSheet(
+                    bodyPart: selectedBodyPart,
+                    onSelect: { exerciseName in
+                        addExercise(name: exerciseName)
+                    }
+                )
+            }
+            .sheet(item: $exerciseForSetInput) { exercise in
+                AddSetSheet(exercise: exercise)
+            }
+            .onAppear {
+                if !isLoaded {
+                    loadPreviousWorkout()
+                    isLoaded = true
+                }
+            }
+        }
+    }
+    
+    private func loadPreviousWorkout() {
+        guard let previousWorkout = previousWorkout else { return }
+        
+        let bodyPartExercises = previousWorkout.exercises.filter { $0.bodyPart == suggestedBodyPart }
+        
+        for previousExercise in bodyPartExercises {
+            let newExercise = Exercise(name: previousExercise.name, bodyPart: previousExercise.bodyPart)
+            
+            // 種目のみ追加（セット情報は空のまま）
+            modelContext.insert(newExercise)
+            currentWorkout.addExercise(newExercise)
+        }
+        
+        // 最初の種目のセット入力画面を自動で開く
+        if let firstExercise = currentWorkout.exercises.first {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                exerciseForSetInput = firstExercise
+            }
+        }
+    }
+    
+    private func addExercise(name: String) {
+        let exercise = Exercise(name: name, bodyPart: selectedBodyPart)
+        modelContext.insert(exercise)
+        currentWorkout.addExercise(exercise)
+        showingExerciseSheet = false
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            exerciseForSetInput = exercise
+        }
+    }
+    
+    private func moveExercise(from source: IndexSet, to destination: Int) {
+        let bodyPartExercises = currentWorkout.exercises.filter { $0.bodyPart == selectedBodyPart }
+        var allExercises = currentWorkout.exercises
+        
+        // 選択中の部位の種目のみを移動
+        var filteredExercises = bodyPartExercises
+        filteredExercises.move(fromOffsets: source, toOffset: destination)
+        
+        // 他の部位の種目を除外して、移動後の順序で全体を再構築
+        let otherExercises = allExercises.filter { $0.bodyPart != selectedBodyPart }
+        
+        // 選択中の部位の種目を挿入位置を考慮して全体リストに統合
+        var newExercises: [Exercise] = []
+        var bodyPartInserted = false
+        
+        for exercise in allExercises {
+            if exercise.bodyPart == selectedBodyPart && !bodyPartInserted {
+                newExercises.append(contentsOf: filteredExercises)
+                bodyPartInserted = true
+            } else if exercise.bodyPart != selectedBodyPart {
+                newExercises.append(exercise)
+            }
+        }
+        
+        if !bodyPartInserted {
+            newExercises.append(contentsOf: filteredExercises)
+        }
+        
+        currentWorkout.exercises = newExercises
+    }
+    
+    private func saveWorkout() {
+        guard hasCompletedSets else { return }
+        
+        // セットが空の種目を除外
+        currentWorkout.exercises = currentWorkout.exercises.filter { !$0.sets.isEmpty }
+        
+        // 同じ日付の既存セッションがあるかチェック
+        mergeOrCreateWorkout()
+        dismiss()
+    }
+    
+    private func mergeOrCreateWorkout() {
+        let calendar = Calendar.current
+        let existingSession = allSessions.first { session in
+            calendar.isDate(session.date, inSameDayAs: currentWorkout.date)
+        }
+        
+        if let existingSession = existingSession {
+            // 既存セッションに種目を統合
+            for exercise in currentWorkout.exercises {
+                if let existingExercise = existingSession.exercises.first(where: { 
+                    $0.name == exercise.name && $0.bodyPart == exercise.bodyPart 
+                }) {
+                    // 既存の種目にセットを追加
+                    existingExercise.sets.append(contentsOf: exercise.sets)
+                } else {
+                    // 新しい種目として追加
+                    existingSession.exercises.append(exercise)
+                }
+            }
+        } else {
+            // 新しいセッションとして保存
+            modelContext.insert(currentWorkout)
+        }
     }
 }
 
@@ -192,25 +860,33 @@ struct PreviousWorkoutDisplay: View {
     let sessions: [WorkoutSession]
     
     private var previousWorkout: WorkoutSession? {
-        sessions.first { session in
+        let calendar = Calendar.current
+        let today = Date()
+        
+        return sessions.first { session in
+            // 当日以前のセッションで、指定の部位を含むもの
+            !calendar.isDate(session.date, inSameDayAs: today) &&
+            session.date < today &&
             session.trainedBodyParts.contains(bodyPart)
         }
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Image(systemName: "clock.arrow.circlepath")
                     .foregroundColor(.orange)
+                    .font(.subheadline)
                 Text("前回の\(bodyPart.displayName)トレーニング")
-                    .font(.headline)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
             }
             .padding(.horizontal)
             
             if let workout = previousWorkout {
                 let bodyPartExercises = workout.exercises.filter { $0.bodyPart == bodyPart }
                 
-                LazyVStack(spacing: 8) {
+                LazyVStack(spacing: 4) {
                     ForEach(bodyPartExercises, id: \.name) { exercise in
                         PreviousExerciseRow(exercise: exercise)
                     }
@@ -218,12 +894,63 @@ struct PreviousWorkoutDisplay: View {
                 .padding(.horizontal)
             } else {
                 Text("まだ\(bodyPart.displayName)のトレーニング記録がありません")
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.horizontal)
+                    .padding(.vertical, 4)
             }
         }
-        .padding(.vertical)
+        .padding(.vertical, 8)
+        .background(Color(.systemGray6).opacity(0.3))
+    }
+}
+
+struct PreviousWorkoutDisplayForEdit: View {
+    let bodyPart: BodyPart
+    let sessions: [WorkoutSession]
+    let editingSessionDate: Date
+    
+    private var previousWorkout: WorkoutSession? {
+        let calendar = Calendar.current
+        
+        return sessions.first { session in
+            // 編集中のセッションより前のセッションで、指定の部位を含むもの
+            !calendar.isDate(session.date, inSameDayAs: editingSessionDate) &&
+            session.date < editingSessionDate &&
+            session.trainedBodyParts.contains(bodyPart)
+        }
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundColor(.orange)
+                    .font(.subheadline)
+                Text("前回の\(bodyPart.displayName)トレーニング")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+            }
+            .padding(.horizontal)
+            
+            if let workout = previousWorkout {
+                let bodyPartExercises = workout.exercises.filter { $0.bodyPart == bodyPart }
+                
+                LazyVStack(spacing: 4) {
+                    ForEach(bodyPartExercises, id: \.name) { exercise in
+                        PreviousExerciseRow(exercise: exercise)
+                    }
+                }
+                .padding(.horizontal)
+            } else {
+                Text("まだ\(bodyPart.displayName)のトレーニング記録がありません")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal)
+                    .padding(.vertical, 4)
+            }
+        }
+        .padding(.vertical, 8)
         .background(Color(.systemGray6).opacity(0.3))
     }
 }
@@ -232,25 +959,29 @@ struct PreviousExerciseRow: View {
     let exercise: Exercise
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 8) {
             Text(exercise.name)
-                .font(.subheadline)
+                .font(.caption)
                 .fontWeight(.medium)
+                .frame(minWidth: 80, alignment: .leading)
             
-            HStack {
-                ForEach(Array(exercise.sets.enumerated()), id: \.offset) { index, set in
-                    Text("\(String(format: "%.0f", set.weight))kg×\(set.reps)")
-                        .font(.caption)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.orange.opacity(0.2))
-                        .cornerRadius(4)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(Array(exercise.sets.enumerated()), id: \.offset) { index, set in
+                        Text("\(String(format: "%.1f", set.weight))×\(set.reps)")
+                            .font(.caption2)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.2))
+                            .cornerRadius(3)
+                    }
                 }
             }
         }
-        .padding()
-        .background(Color.white)
-        .cornerRadius(8)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(6)
     }
 }
 
@@ -259,6 +990,10 @@ struct CurrentWorkoutView: View {
     let selectedBodyPart: BodyPart
     let onAddExercise: () -> Void
     let onAddSet: (Exercise) -> Void
+    let onDeleteExercise: (Exercise) -> Void
+    let onMoveExercise: (IndexSet, Int) -> Void
+    
+    @State private var editMode: EditMode = .inactive
     
     private var bodyPartExercises: [Exercise] {
         workout.exercises.filter { $0.bodyPart == selectedBodyPart }
@@ -271,6 +1006,16 @@ struct CurrentWorkoutView: View {
                     .font(.headline)
                 
                 Spacer()
+                
+                if !bodyPartExercises.isEmpty {
+                    Button(editMode == .active ? "完了" : "編集") {
+                        withAnimation {
+                            editMode = editMode == .active ? .inactive : .active
+                        }
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.blue)
+                }
                 
                 Button("種目追加", action: onAddExercise)
                     .font(.subheadline)
@@ -285,14 +1030,33 @@ struct CurrentWorkoutView: View {
                     .padding(.horizontal)
                     .padding(.vertical, 20)
             } else {
-                LazyVStack(spacing: 12) {
+                List {
                     ForEach(bodyPartExercises, id: \.name) { exercise in
-                        CurrentExerciseRow(exercise: exercise) {
-                            onAddSet(exercise)
-                        }
+                        CurrentExerciseRow(
+                            exercise: exercise,
+                            onAddSet: {
+                                onAddSet(exercise)
+                            },
+                            onDeleteExercise: {
+                                onDeleteExercise(exercise)
+                            }
+                        )
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                     }
+                    .onMove(perform: editMode == .active ? { indices, newOffset in
+                        onMoveExercise(indices, newOffset)
+                    } : nil)
+                    .onDelete(perform: editMode == .active ? { indexSet in
+                        for index in indexSet {
+                            onDeleteExercise(bodyPartExercises[index])
+                        }
+                    } : nil)
                 }
-                .padding(.horizontal)
+                .listStyle(PlainListStyle())
+                .environment(\.editMode, $editMode)
+                .frame(minHeight: CGFloat(bodyPartExercises.count * 120))
             }
         }
         .padding(.vertical)
@@ -302,13 +1066,18 @@ struct CurrentWorkoutView: View {
 struct CurrentExerciseRow: View {
     let exercise: Exercise
     let onAddSet: () -> Void
+    let onDeleteExercise: () -> Void
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(exercise.name)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
+                Button(action: onAddSet) {
+                    Text(exercise.name)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.primary)
+                }
+                .buttonStyle(PlainButtonStyle())
                 
                 Spacer()
                 
@@ -324,7 +1093,7 @@ struct CurrentExerciseRow: View {
             } else {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 4) {
                     ForEach(Array(exercise.sets.enumerated()), id: \.offset) { index, set in
-                        Text("Set\(index + 1): \(String(format: "%.0f", set.weight))kg×\(set.reps)")
+                        Text("Set\(index + 1): \(String(format: "%.1f", set.weight))kg×\(set.reps)")
                             .font(.caption)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -337,11 +1106,19 @@ struct CurrentExerciseRow: View {
         .padding()
         .background(Color(.systemGray6))
         .cornerRadius(8)
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button("削除", role: .destructive) {
+                onDeleteExercise()
+            }
+        }
     }
 }
 
 struct ExerciseSelectionSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query private var customExercises: [CustomExercise]
+    
     let bodyPart: BodyPart
     let onSelect: (String) -> Void
     
@@ -349,24 +1126,135 @@ struct ExerciseSelectionSheet: View {
     @State private var showingCustomInput = false
     @State private var showingAllExercises = false
     
-    private var exercisesToShow: [String] {
-        showingAllExercises ? bodyPart.defaultExercises : bodyPart.primaryExercises
+    private var topExercises: [String] {
+        bodyPart.getTopExercises(customExercises: customExercises)
     }
     
+    private var allExercises: [String] {
+        bodyPart.getSortedExercises(customExercises: customExercises)
+    }
+    
+    private var exercisesToShow: [String] {
+        showingAllExercises ? allExercises : topExercises
+    }
+    
+    private func selectExercise(_ exerciseName: String) {
+        // 種目使用回数を記録
+        recordExerciseUsage(exerciseName)
+        onSelect(exerciseName)
+        dismiss()
+    }
+    
+    private func recordExerciseUsage(_ exerciseName: String) {
+        // 既存の記録を探す
+        if let existingExercise = customExercises.first(where: { $0.name == exerciseName && $0.bodyPart == bodyPart }) {
+            existingExercise.recordUsage()
+        } else {
+            // 新しい記録を作成
+            let newExercise = CustomExercise(name: exerciseName, bodyPart: bodyPart, isCustom: false)
+            newExercise.recordUsage()
+            modelContext.insert(newExercise)
+        }
+        
+        // 保存
+        try? modelContext.save()
+    }
+    
+    private func getUsageInfo(for exerciseName: String) -> (count: Int, isCustom: Bool) {
+        if let exercise = customExercises.first(where: { $0.name == exerciseName && $0.bodyPart == bodyPart }) {
+            return (exercise.usageCount, exercise.isCustom)
+        }
+        return (0, false)
+    }
+    
+    private func addCustomExercise(_ exerciseName: String) {
+        // 重複チェック
+        let existingExercise = customExercises.first { $0.name == exerciseName && $0.bodyPart == bodyPart }
+        
+        if existingExercise == nil {
+            // 新しいカスタム種目を作成
+            let newCustomExercise = CustomExercise(name: exerciseName, bodyPart: bodyPart, isCustom: true)
+            newCustomExercise.recordUsage() // 作成時に1回使用として記録
+            modelContext.insert(newCustomExercise)
+            try? modelContext.save()
+        }
+        
+        // 種目を選択して画面を閉じる
+        selectExercise(exerciseName)
+        
+        // 入力状態をリセット
+        showingCustomInput = false
+        customExerciseName = ""
+    }
+    
+    private func deleteCustomExercise(_ exercise: CustomExercise) {
+        modelContext.delete(exercise)
+        try? modelContext.save()
+    }
+
     var body: some View {
         NavigationView {
             List {
-                Section(header: Text("定番種目")) {
+                Section(header: HStack {
+                    Text(showingAllExercises ? "全種目（使用頻度順）" : "よく使う種目 TOP5")
+                    Spacer()
+                    if !showingAllExercises && !topExercises.isEmpty {
+                        Text("🔥 人気")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                }) {
                     ForEach(exercisesToShow, id: \.self) { exercise in
-                        Button(exercise) {
-                            onSelect(exercise)
-                            dismiss()
+                        let usageInfo = getUsageInfo(for: exercise)
+                        
+                        Button(action: {
+                            selectExercise(exercise)
+                        }) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(exercise)
+                                        .foregroundColor(.primary)
+                                        .font(.subheadline)
+                                    
+                                    if usageInfo.count > 0 {
+                                        HStack(spacing: 8) {
+                                            Text("使用回数: \(usageInfo.count)")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                            
+                                            if usageInfo.isCustom {
+                                                Text("🔧 カスタム")
+                                                    .font(.caption)
+                                                    .foregroundColor(.blue)
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                Spacer()
+                                
+                                if usageInfo.count > 0 {
+                                    HStack(spacing: 2) {
+                                        ForEach(0..<min(usageInfo.count, 5), id: \.self) { _ in
+                                            Image(systemName: "star.fill")
+                                                .font(.caption2)
+                                                .foregroundColor(.orange)
+                                        }
+                                        
+                                        if usageInfo.count > 5 {
+                                            Text("+\(usageInfo.count - 5)")
+                                                .font(.caption2)
+                                                .foregroundColor(.orange)
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        .foregroundColor(.primary)
+                        .buttonStyle(PlainButtonStyle())
                     }
                     
                     // もっと見る/閉じるボタン
-                    if bodyPart.defaultExercises.count > bodyPart.primaryExercises.count {
+                    if allExercises.count > topExercises.count {
                         Button(action: {
                             withAnimation {
                                 showingAllExercises.toggle()
@@ -375,7 +1263,7 @@ struct ExerciseSelectionSheet: View {
                             HStack {
                                 Image(systemName: showingAllExercises ? "chevron.up" : "chevron.down")
                                     .font(.caption)
-                                Text(showingAllExercises ? "閉じる" : "もっと見る (\(bodyPart.defaultExercises.count - bodyPart.primaryExercises.count)種目)")
+                                Text(showingAllExercises ? "上位5種目のみ表示" : "全種目を表示 (\(allExercises.count)種目)")
                                     .font(.subheadline)
                             }
                             .foregroundColor(.blue)
@@ -383,7 +1271,65 @@ struct ExerciseSelectionSheet: View {
                     }
                 }
                 
-                Section(header: Text("カスタム種目")) {
+                // 既存のカスタム種目を表示
+                let existingCustomExercises = customExercises.filter { $0.bodyPart == bodyPart && $0.isCustom }
+                if !existingCustomExercises.isEmpty {
+                    Section(header: Text("登録済みカスタム種目")) {
+                        ForEach(existingCustomExercises, id: \.name) { exercise in
+                            HStack {
+                                Button(action: {
+                                    selectExercise(exercise.name)
+                                }) {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(exercise.name)
+                                                .foregroundColor(.primary)
+                                                .font(.subheadline)
+                                            
+                                            HStack(spacing: 8) {
+                                                Text("使用回数: \(exercise.usageCount)")
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                                
+                                                Text("🔧 カスタム")
+                                                    .font(.caption)
+                                                    .foregroundColor(.blue)
+                                            }
+                                        }
+                                        
+                                        Spacer()
+                                        
+                                        HStack(spacing: 2) {
+                                            ForEach(0..<min(exercise.usageCount, 5), id: \.self) { _ in
+                                                Image(systemName: "star.fill")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.orange)
+                                            }
+                                            
+                                            if exercise.usageCount > 5 {
+                                                Text("+\(exercise.usageCount - 5)")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.orange)
+                                            }
+                                        }
+                                    }
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                
+                                Button(action: {
+                                    deleteCustomExercise(exercise)
+                                }) {
+                                    Image(systemName: "trash")
+                                        .foregroundColor(.red)
+                                        .font(.caption)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                            }
+                        }
+                    }
+                }
+                
+                Section(header: Text("カスタム種目を追加")) {
                     if showingCustomInput {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("新しい種目名を入力")
@@ -396,8 +1342,7 @@ struct ExerciseSelectionSheet: View {
                                 
                                 Button("追加") {
                                     if !customExerciseName.isEmpty {
-                                        onSelect(customExerciseName)
-                                        dismiss()
+                                        addCustomExercise(customExerciseName)
                                     }
                                 }
                                 .buttonStyle(.borderedProminent)
@@ -438,12 +1383,30 @@ struct ExerciseSelectionSheet: View {
 
 struct AddSetSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \WorkoutSession.date, order: .reverse) private var allWorkoutSessions: [WorkoutSession]
     let exercise: Exercise
     
     @State private var weight: String = ""
     @State private var reps: String = ""
     @State private var memo: String = ""
     @FocusState private var isInputFocused: Bool
+    
+    // 前回の同じ種目を取得
+    private var previousSameExercise: Exercise? {
+        let calendar = Calendar.current
+        let today = Date()
+        
+        for session in allWorkoutSessions {
+            // 当日以前のセッションのみ対象
+            if !calendar.isDate(session.date, inSameDayAs: today) && session.date < today {
+                if let foundExercise = session.exercises.first(where: { $0.name == exercise.name && $0.bodyPart == exercise.bodyPart }) {
+                    return foundExercise
+                }
+            }
+        }
+        return nil
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -492,11 +1455,75 @@ struct AddSetSheet: View {
                     }
                     .padding(.top)
                     
+                    // 前回の同じ種目セット表示
+                    if let previousExercise = previousSameExercise, !previousExercise.sets.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .foregroundColor(.orange)
+                                    .font(.subheadline)
+                                Text("前回の\(exercise.name)")
+                                    .font(.headline)
+                                Spacer()
+                            }
+                            .padding(.horizontal)
+                            
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 12) {
+                                    ForEach(Array(previousExercise.sets.enumerated()), id: \.offset) { index, set in
+                                        VStack(spacing: 6) {
+                                            Text("Set \(index + 1)")
+                                                .font(.caption)
+                                                .fontWeight(.medium)
+                                                .foregroundColor(.secondary)
+                                            
+                                            VStack(spacing: 2) {
+                                                Text("\(String(format: "%.1f", set.weight))kg")
+                                                    .font(.subheadline)
+                                                    .fontWeight(.semibold)
+                                                Text("\(set.reps)回")
+                                                    .font(.subheadline)
+                                                
+                                                if !set.memo.isEmpty {
+                                                    Text(set.memo)
+                                                        .font(.caption)
+                                                        .foregroundColor(.secondary)
+                                                        .lineLimit(2)
+                                                }
+                                            }
+                                        }
+                                        .padding()
+                                        .background(Color.orange.opacity(0.1))
+                                        .cornerRadius(12)
+                                        .onTapGesture {
+                                            // 前回値を入力欄に設定
+                                            weight = set.weight.truncatingRemainder(dividingBy: 1) == 0 ? 
+                                                String(format: "%.0f", set.weight) : 
+                                                String(format: "%.1f", set.weight)
+                                            reps = String(set.reps)
+                                            memo = set.memo
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal)
+                            }
+                            
+                            Text("セットをタップすると同じ値を入力できます")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal)
+                        }
+                        .padding(.vertical)
+                        .background(Color.orange.opacity(0.05))
+                        .cornerRadius(12)
+                        .padding(.horizontal)
+                    }
+                    
                     // 既存セット表示
                     if !exercise.sets.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
-                                Text("完了済みセット")
+                                Text("今回の完了済みセット")
                                     .font(.headline)
                                 Spacer()
                             }
@@ -512,7 +1539,7 @@ struct AddSetSheet: View {
                                                 .foregroundColor(.secondary)
                                             
                                             VStack(spacing: 2) {
-                                                Text("\(String(format: "%.0f", set.weight))kg")
+                                                Text("\(String(format: "%.1f", set.weight))kg")
                                                     .font(.subheadline)
                                                     .fontWeight(.semibold)
                                                 Text("\(set.reps)回")
@@ -531,7 +1558,9 @@ struct AddSetSheet: View {
                                         .cornerRadius(12)
                                         .onTapGesture {
                                             // 前回値を入力欄に設定
-                                            weight = String(format: "%.0f", set.weight)
+                                            weight = set.weight.truncatingRemainder(dividingBy: 1) == 0 ? 
+                                                String(format: "%.0f", set.weight) : 
+                                                String(format: "%.1f", set.weight)
                                             reps = String(set.reps)
                                             memo = set.memo
                                         }
@@ -563,7 +1592,7 @@ struct AddSetSheet: View {
                                 Text("重量 (kg)")
                                     .font(.subheadline)
                                     .fontWeight(.medium)
-                                TextField("例: 50", text: $weight)
+                                TextField("例: 50.0", text: $weight)
                                     .keyboardType(.decimalPad)
                                     .textFieldStyle(RoundedBorderTextFieldStyle())
                                     .focused($isInputFocused)
@@ -593,6 +1622,32 @@ struct AddSetSheet: View {
                     
                     // ボタン
                     VStack(spacing: 12) {
+                        // 前回の同じ種目の次のセットを自動入力するボタン
+                        if let previousExercise = previousSameExercise {
+                            let nextSetIndex = exercise.sets.count
+                            if nextSetIndex < previousExercise.sets.count {
+                                let nextSet = previousExercise.sets[nextSetIndex]
+                                Button(action: {
+                                    weight = nextSet.weight.truncatingRemainder(dividingBy: 1) == 0 ? 
+                                        String(format: "%.0f", nextSet.weight) : 
+                                        String(format: "%.1f", nextSet.weight)
+                                    reps = String(nextSet.reps)
+                                    memo = nextSet.memo
+                                }) {
+                                    HStack {
+                                        Image(systemName: "clock.arrow.circlepath")
+                                        Text("前回Set\(nextSetIndex + 1)の値を使用 (\(String(format: "%.1f", nextSet.weight))kg×\(nextSet.reps))")
+                                    }
+                                    .font(.subheadline)
+                                    .foregroundColor(.orange)
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(Color.orange.opacity(0.1))
+                                    .cornerRadius(12)
+                                }
+                            }
+                        }
+                        
                         Button(action: addSet) {
                             HStack {
                                 Image(systemName: "plus.circle.fill")
@@ -645,6 +1700,15 @@ struct AddSetSheet: View {
             }
         }
         .onAppear {
+            // 前回の同じ種目の最初のセットを自動入力（今回のセットがまだない場合のみ）
+            if exercise.sets.isEmpty, let previousExercise = previousSameExercise, let firstSet = previousExercise.sets.first {
+                weight = firstSet.weight.truncatingRemainder(dividingBy: 1) == 0 ? 
+                    String(format: "%.0f", firstSet.weight) : 
+                    String(format: "%.1f", firstSet.weight)
+                reps = String(firstSet.reps)
+                memo = firstSet.memo
+            }
+            
             // 初回表示時にフォーカスを設定
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 isInputFocused = true
@@ -679,7 +1743,7 @@ struct SaveWorkoutButton: View {
             if !workout.exercises.isEmpty {
                 HStack {
                     VStack(alignment: .leading) {
-                        Text("総重量: \(String(format: "%.0f", workout.totalVolume))kg")
+                        Text("総重量: \(String(format: "%.1f", workout.totalVolume))kg")
                             .font(.subheadline)
                         Text("種目数: \(workout.exercises.count)")
                             .font(.caption)
@@ -711,51 +1775,67 @@ struct EditWorkoutSheet: View {
     @Query(sort: \WorkoutSession.date, order: .reverse) private var allWorkoutSessions: [WorkoutSession]
     
     let session: WorkoutSession
-    @State private var selectedBodyPart: BodyPart = .chest
+    @State private var selectedBodyPart: BodyPart
     @State private var showingExerciseSheet = false
     @State private var exerciseForSetInput: Exercise?
     @State private var showingDeleteExerciseAlert = false
     @State private var exerciseToDelete: Exercise?
     
+    init(session: WorkoutSession) {
+        self.session = session
+        // セッションの最初の種目の部位を自動選択
+        let initialBodyPart = session.exercises.first?.bodyPart ?? .chest
+        _selectedBodyPart = State(initialValue: initialBodyPart)
+    }
+    
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                // 日付表示
-                VStack(spacing: 8) {
-                    Text("ワークアウト編集")
-                        .font(.headline)
-                    Text(session.date.formatted(date: .complete, time: .shortened))
+                // 日付表示（コンパクト）
+                HStack {
+                    Text(session.date.formatted(date: .abbreviated, time: .shortened))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
+                    Spacer()
                 }
-                .padding()
+                .padding(.horizontal)
+                .padding(.vertical, 8)
                 .background(Color(.systemGray6))
                 
-                // 部位選択
+                // 部位選択（固定）
                 BodyPartPicker(selectedBodyPart: $selectedBodyPart)
                 
-                // 前回の記録表示
-                PreviousWorkoutDisplay(bodyPart: selectedBodyPart, sessions: allWorkoutSessions)
-                
-                // 現在のワークアウト編集
-                EditCurrentWorkoutView(
-                    session: session,
-                    selectedBodyPart: selectedBodyPart,
-                    onAddExercise: {
-                        showingExerciseSheet = true
-                    },
-                    onAddSet: { exercise in
-                        exerciseForSetInput = exercise
-                    },
-                    onDeleteExercise: { exercise in
-                        exerciseToDelete = exercise
-                        showingDeleteExerciseAlert = true
+                // スクロール可能なコンテンツ
+                ScrollView {
+                    VStack(spacing: 0) {
+                        // 前回の記録表示
+                        PreviousWorkoutDisplayForEdit(bodyPart: selectedBodyPart, sessions: allWorkoutSessions, editingSessionDate: session.date)
+                        
+                        // 現在のワークアウト編集
+                        EditCurrentWorkoutView(
+                            session: session,
+                            selectedBodyPart: selectedBodyPart,
+                            onAddExercise: {
+                                showingExerciseSheet = true
+                            },
+                            onAddSet: { exercise in
+                                exerciseForSetInput = exercise
+                            },
+                            onDeleteExercise: { exercise in
+                                exerciseToDelete = exercise
+                                showingDeleteExerciseAlert = true
+                            },
+                            onMoveExercise: { indices, newOffset in
+                                moveExercise(from: indices, to: newOffset)
+                            }
+                        )
+                        
+                        // 保存ボタンの余白確保
+                        Spacer(minLength: 100)
                     }
-                )
+                }
                 
-                Spacer()
-                
-                // 保存ボタン
+                // 保存ボタン（固定）
                 EditSaveWorkoutButton(session: session) {
                     saveWorkout()
                 }
@@ -810,7 +1890,46 @@ struct EditWorkoutSheet: View {
         exerciseToDelete = nil
     }
     
+    private func moveExercise(from source: IndexSet, to destination: Int) {
+        let bodyPartExercises = session.exercises.filter { $0.bodyPart == selectedBodyPart }
+        var allExercises = session.exercises
+        
+        // 選択中の部位の種目のみを移動
+        var filteredExercises = bodyPartExercises
+        filteredExercises.move(fromOffsets: source, toOffset: destination)
+        
+        // 他の部位の種目を除外して、移動後の順序で全体を再構築
+        let otherExercises = allExercises.filter { $0.bodyPart != selectedBodyPart }
+        
+        // 選択中の部位の種目を挿入位置を考慮して全体リストに統合
+        var newExercises: [Exercise] = []
+        var bodyPartInserted = false
+        
+        for exercise in allExercises {
+            if exercise.bodyPart == selectedBodyPart && !bodyPartInserted {
+                newExercises.append(contentsOf: filteredExercises)
+                bodyPartInserted = true
+            } else if exercise.bodyPart != selectedBodyPart {
+                newExercises.append(exercise)
+            }
+        }
+        
+        if !bodyPartInserted {
+            newExercises.append(contentsOf: filteredExercises)
+        }
+        
+        session.exercises = newExercises
+    }
+    
     private func saveWorkout() {
+        // セットが空の種目を除外
+        session.exercises = session.exercises.filter { !$0.sets.isEmpty }
+        
+        guard !session.exercises.isEmpty else { 
+            dismiss()
+            return 
+        }
+        
         do {
             try modelContext.save()
         } catch {
@@ -826,95 +1945,123 @@ struct EditCurrentWorkoutView: View {
     let onAddExercise: () -> Void
     let onAddSet: (Exercise) -> Void
     let onDeleteExercise: (Exercise) -> Void
+    let onMoveExercise: (IndexSet, Int) -> Void
+    
+    @State private var editMode: EditMode = .inactive
     
     private var bodyPartExercises: [Exercise] {
         session.exercises.filter { $0.bodyPart == selectedBodyPart }
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("\(selectedBodyPart.displayName)の種目")
-                    .font(.headline)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
                 
                 Spacer()
                 
+                if !bodyPartExercises.isEmpty {
+                    Button(editMode == .active ? "完了" : "編集") {
+                        withAnimation {
+                            editMode = editMode == .active ? .inactive : .active
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                }
+                
                 Button("種目追加", action: onAddExercise)
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundColor(.blue)
             }
             .padding(.horizontal)
             
             if bodyPartExercises.isEmpty {
                 Text("種目を追加してトレーニングを編集しましょう")
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.horizontal)
-                    .padding(.vertical, 20)
+                    .padding(.vertical, 8)
             } else {
-                LazyVStack(spacing: 12) {
+                List {
                     ForEach(bodyPartExercises, id: \.name) { exercise in
                         EditExerciseRow(
                             exercise: exercise,
                             onAddSet: {
                                 onAddSet(exercise)
-                            },
-                            onDelete: {
-                                onDeleteExercise(exercise)
                             }
                         )
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
                     }
+                    .onMove(perform: editMode == .active ? { indices, newOffset in
+                        onMoveExercise(indices, newOffset)
+                    } : nil)
+                    .onDelete(perform: editMode == .active ? { indexSet in
+                        for index in indexSet {
+                            onDeleteExercise(bodyPartExercises[index])
+                        }
+                    } : nil)
                 }
-                .padding(.horizontal)
+                .listStyle(PlainListStyle())
+                .environment(\.editMode, $editMode)
+                .frame(minHeight: CGFloat(bodyPartExercises.count * 80))
             }
         }
-        .padding(.vertical)
+        .padding(.vertical, 8)
     }
 }
 
 struct EditExerciseRow: View {
     let exercise: Exercise
     let onAddSet: () -> Void
-    let onDelete: () -> Void
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(exercise.name)
-                    .font(.subheadline)
+                    .font(.caption)
                     .fontWeight(.medium)
                 
                 Spacer()
                 
-                Button("セット追加", action: onAddSet)
-                    .font(.caption)
+                Button(action: onAddSet) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus.circle")
+                            .font(.caption)
+                        Text("セット追加")
+                            .font(.caption)
+                    }
                     .foregroundColor(.blue)
-                
-                Button("削除", action: onDelete)
-                    .font(.caption)
-                    .foregroundColor(.red)
+                }
             }
             
             if exercise.sets.isEmpty {
                 Text("セットを追加してください")
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundColor(.secondary)
             } else {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 4) {
-                    ForEach(Array(exercise.sets.enumerated()), id: \.offset) { index, set in
-                        Text("Set\(index + 1): \(String(format: "%.0f", set.weight))kg×\(set.reps)")
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.blue.opacity(0.1))
-                            .cornerRadius(6)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(Array(exercise.sets.enumerated()), id: \.offset) { index, set in
+                            Text("S\(index + 1): \(String(format: "%.1f", set.weight))×\(set.reps)")
+                                .font(.caption2)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(Color.blue.opacity(0.1))
+                                .cornerRadius(4)
+                        }
                     }
                 }
             }
         }
-        .padding()
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
         .background(Color(.systemGray6))
-        .cornerRadius(8)
+        .cornerRadius(6)
     }
 }
 
@@ -927,7 +2074,7 @@ struct EditSaveWorkoutButton: View {
             if !session.exercises.isEmpty {
                 HStack {
                     VStack(alignment: .leading) {
-                        Text("総重量: \(String(format: "%.0f", session.totalVolume))kg")
+                        Text("総重量: \(String(format: "%.1f", session.totalVolume))kg")
                             .font(.subheadline)
                         Text("種目数: \(session.exercises.count)")
                             .font(.caption)

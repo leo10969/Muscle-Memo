@@ -15,6 +15,7 @@ struct Muscle_MemoApp: App {
             WorkoutSession.self,
             Exercise.self,
             ExerciseSet.self,
+            CustomExercise.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
